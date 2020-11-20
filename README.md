@@ -32,7 +32,17 @@ npm i --save @imqueue/job
 # Usage
 
 ~~~typescript
-// TODO: write examples
+import JobQueue from '@imqueue/job';
+
+new JobQueue<string>({ name: 'TestJob' })
+    .onPop(job => console.log(job))
+    .start().then(queue => queue
+        .push('Hello, world!')
+        .push('Hello, world after 1 sec!', { delay: 1000 })
+        .push('Hello, world after 2 sec!', { delay: 2000 })
+        .push('Hello, world after 5 sec!', { delay: 5000 })
+        .push('Hello, world after 10 sec!', { delay: 10000 }),
+);
 ~~~
 
 ## License
