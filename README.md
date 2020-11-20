@@ -37,4 +37,4 @@ npm i --save @imqueue/job
 
 ## License
 
-[ISC](https://rawgit.com/imqueue/core/master/LICENSE)
+[ISC](https://rawgit.com/imqueue/job/master/LICENSE)
