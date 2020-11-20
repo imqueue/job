@@ -1,0 +1,94 @@
+{
+  "name": "@imqueue/job",
+  "version": "1.0.0",
+  "description": "Simple job queue",
+  "keywords": [
+    "message-queue",
+    "redis",
+    "redis-queue",
+    "job-queue",
+    "job-message-queue",
+    "json",
+    "json-message",
+    "json-message-queue"
+  ],
+  "scripts": {
+    "prepare": "./node_modules/.bin/tsc",
+    "show:test": "/usr/bin/env node -e \"require('open')('file://`pwd`/coverage/index.html',{wait:false});\"",
+    "test": "./node_modules/.bin/tsc && ./node_modules/.bin/nyc mocha && npm run show:test",
+    "clean-typedefs": "find . -name '*.d.ts' -not -wholename '*node_modules*' -not -wholename '*generator*' -type f -delete",
+    "clean-maps": "find . -name '*.js.map' -not -wholename '*node_modules*' -not -wholename '*generator*' -type f -delete",
+    "clean-js": "find . -name '*.js' -not -wholename '*node_modules*' -not -wholename '*generator*' -type f -delete",
+    "clean-tests": "rm -rf .nyc_output coverage",
+    "clean-doc": "rm -rf docs",
+    "clean-benchmark": "rm -rf benchmark-result",
+    "clean": "npm run clean-tests && npm run clean-typedefs && npm run clean-maps && npm run clean-js && npm run clean-doc && npm run clean-benchmark",
+    "doc": "rm -rf docs && typedoc  --excludePrivate --excludeExternals --hideGenerator --exclude \"**/+(test|node_modules|docs|coverage|benchmark|.nyc_output)/**/*\" --mode file --out ./docs . && /usr/bin/env node -e \"require('open')('file://`pwd`/docs/index.html',{wait:false})\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/imqueue/job.git"
+  },
+  "bugs": {
+    "url": "https://github.com/imqueue/job/issues"
+  },
+  "homepage": "https://imqueue.com/",
+  "author": "imqueue.com <support@imqueue.com> (https://imqueue.com)",
+  "license": "ISC",
+  "dependencies": {
+    "@imqueue/core": "^1.8.1"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.2.14",
+    "@types/mocha": "^8.0.3",
+    "@types/mock-require": "^2.0.0",
+    "@types/node": "^14.14.6",
+    "@types/sinon": "^9.0.8",
+    "chai": "^4.2.0",
+    "mocha": "^8.2.1",
+    "mocha-lcov-reporter": "^1.3.0",
+    "mock-require": "^3.0.3",
+    "nyc": "^15.1.0",
+    "open": "^7.3.0",
+    "reflect-metadata": "^0.1.13",
+    "sinon": "^9.2.1",
+    "source-map-support": "^0.5.19",
+    "ts-node": "^9.0.0",
+    "tslint": "^6.1.3",
+    "typedoc": "^0.19.2",
+    "typescript": "^4.0.5",
+    "yargs": "^16.1.0"
+  },
+  "main": "index.js",
+  "typescript": {
+    "definitions": "index.d.ts"
+  },
+  "mocha": {
+    "require": [
+      "ts-node/register",
+      "source-map-support/register"
+    ],
+    "recursive": true,
+    "bail": true,
+    "full-trace": true
+  },
+  "nyc": {
+    "check-coverage": false,
+    "extension": [
+      ".ts"
+    ],
+    "exclude": [
+      "**/*.d.ts",
+      "**/test/**"
+    ],
+    "require": [
+      "ts-node/register"
+    ],
+    "reporter": [
+      "html",
+      "text",
+      "text-summary",
+      "lcovonly"
+    ]
+  }
+}
