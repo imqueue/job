@@ -1,8 +1,6 @@
 # Simple Job Queue (@imqueue/job)
 
 [![Build Status](https://travis-ci.org/imqueue/job.svg?branch=master)](https://travis-ci.org/imqueue/job) 
-[![David](https://img.shields.io/david/imqueue/job.svg)](https://david-dm.org/imqueue/job)
-[![David](https://img.shields.io/david/dev/imqueue/job.svg)](https://david-dm.org/imqueue/job?type=dev)
 [![Known Vulnerabilities](https://snyk.io/test/github/imqueue/job/badge.svg?targetFile=package.json)](https://snyk.io/test/github/imqueue/job?targetFile=package.json)
 [![License](https://img.shields.io/badge/license-ISC-blue.svg)](https://rawgit.com/imqueue/core/master/LICENSE)
 
