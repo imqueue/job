@@ -15,14 +15,72 @@
  * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
  * PERFORMANCE OF THIS SOFTWARE.
  */
-import IMQ, { AnyJson, ILogger, IMessageQueue } from '@imqueue/core';
+import IMQ, {
+    AnyJson,
+    ILogger,
+    IMessageQueue,
+    IMQMode,
+    IMQOptions,
+} from '@imqueue/core';
 
+/**
+ * Job queues options
+ */
 export interface JobQueueOptions {
+    /**
+     * Name of the job queue. In worker/publisher mode worker and
+     * publisher must share the same job queue name.
+     * Mandatory.
+     *
+     * @type {string}
+     */
     name: string;
+
+    /**
+     * Connection params of the queue engine cluster (typically -
+     * host and port). By default the broker is redis.
+     * Optional.
+     * By default is [{ host: "localhost", port: 6379 }].
+     *
+     * @type {Array<{host: string, port: number}>}
+     */
     cluster?: { host: string; port: number; }[];
+
+    /**
+     * Logger to be used for producing log and error messages.
+     * Optional.
+     * By default is console.
+     *
+     * @type {ILogger}
+     */
     logger?: ILogger;
+
+    /**
+     * Safe message delivery or not? When safe delivery is enabled (by default)
+     * queue is processing jobs with guarantied job data delivery. If process
+     * fails or dies - job data is re-queued for future processing by another
+     * worker.
+     * Optional.
+     * Default is true.
+     *
+     * @type {boolean}
+     */
     safe?: boolean;
+
+    /**
+     * TTL in milliseconds of the job in worker queue during safe delivery.
+     * If worker does not finish processing after this TTL - job is re-queued
+     * for other workers to be processed.
+     * Optional.
+     * By default is 10000.
+     */
     safeLockTtl?: number;
+
+    /**
+     * Job queue prefix in queue broker.
+     * Optional.
+     * By default is "imq-job".
+     */
     prefix?: string;
 }
 
@@ -80,38 +138,35 @@ export interface PushOptions {
     ttl?: number;
 }
 
-// noinspection JSUnusedGlobalSymbols
+export interface AnyJobQueue<T> {
+    name: string;
+    readonly logger: ILogger;
+    start(): Promise<T>;
+    stop(): Promise<T>;
+    destroy(): Promise<void>;
+}
+
+export interface AnyJobQueueWorker<T, U> {
+    onPop(handler: JobQueuePopHandler<U>): T;
+}
+
+export interface AnyJobQueuePublisher<T, U> {
+    push(job: U, options?: PushOptions): T;
+}
+
 /**
- * Implements simple scheduled job queue. Job scheduling is optional. It may
- * process jobs immediately or after specified delay for particular job.
- * It also allows to define max lifetime of the job in a queue, after which
- * the job is removed from a queue.
- * Supports graceful shutdown, if TERM or SIGINT is sent to the process.
+ * Abstract job queue, handles base implementations of AnyJobQueue interface.
  */
-export default class JobQueue<T> {
-    private imq: IMessageQueue;
-    private handler: JobQueuePopHandler<T>;
-    private options: JobQueueOptions;
-    private readonly logger: ILogger;
+export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
+    protected imq: IMessageQueue;
+    protected handler: JobQueuePopHandler<U>;
 
-    /**
-     * Constructor. Instantiates new JobQueue instance.
-     *
-     * @constructor
-     * @param {JobQueueOptions} options
-     */
-    public constructor(options: JobQueueOptions) {
+    public readonly logger: ILogger;
+
+    protected constructor(
+        protected options: JobQueueOptions,
+    ) {
         this.logger = options.logger || console;
-        this.options = options;
-
-        this.imq = IMQ.create(options.name, {
-            cluster: options.cluster,
-            cleanup: false,
-            safeDelivery: options.safe,
-            safeDeliveryTtl: options.safeLockTtl,
-            logger: this.logger,
-            prefix: options.prefix || 'job-queue',
-        });
     }
 
     /**
@@ -126,29 +181,23 @@ export default class JobQueue<T> {
     /**
      * Starts processing job queue
      *
-     * @return {Promise<JobQueue<T>>} - this queue
+     * @return {Promise<T>} - this queue
      */
-    public async start(): Promise<JobQueue<T>> {
-        if (!this.handler) {
-            throw new TypeError(
-                'Message handler is not set, can not start job queue!',
-            );
-        }
-
+    public async start(): Promise<T> {
         await this.imq.start();
 
-        return this;
+        return this as any as T;
     }
 
     /**
      * Stops processing job queue
      *
-     * @return {Promise<JobQueue<T>>} - this queue
+     * @return {Promise<T>} - this queue
      */
-    public async stop(): Promise<JobQueue<T>> {
+    public async stop(): Promise<T> {
         await this.imq.stop();
 
-        return this;
+        return this as any as T;
     }
 
     /**
@@ -159,22 +208,65 @@ export default class JobQueue<T> {
     public async destroy() {
         await this.imq.destroy();
     }
+}
+
+/**
+ * Creates and returns IMQOptions derived from a given JobQueueOptions
+ *
+ * @param {JobQueueOptions} options
+ * @param {ILogger} logger
+ * @return {Partial<IMQOptions>}
+ * @private
+ */
+function toIMQOptions(
+    options: JobQueueOptions,
+    logger: ILogger,
+): Partial<IMQOptions> {
+    return {
+        cluster: options.cluster,
+        cleanup: false,
+        safeDelivery: typeof options.safe === 'undefined'
+            ? true : options.safe,
+        safeDeliveryTtl: typeof options.safeLockTtl === 'undefined'
+            ? 10000 : options.safeLockTtl,
+        prefix: options.prefix || 'imq-job',
+        logger,
+    };
+}
+
+// noinspection JSUnusedGlobalSymbols
+/**
+ * Implements simple scheduled job queue publisher. Job queue publisher is only
+ * responsible for pushing queue messages.
+ */
+export class JobQueuePublisher<T> extends BaseJobQueue<JobQueuePublisher<T>, T>
+implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
+{
+    /**
+     * Constructor. Instantiates new JobQueue instance.
+     *
+     * @constructor
+     * @param {JobQueueOptions} options
+     */
+    public constructor(options: JobQueueOptions) {
+        super(options);
+
+        this.imq = IMQ.create(
+            options.name,
+            toIMQOptions(options, this.logger),
+            IMQMode.PUBLISHER,
+        );
+    }
 
     /**
      * Pushes new job to this queue
      *
      * @param {T} job - job data itself of user defined type
      * @param {PushOptions} options - push options, like delay and ttl for job
-     * @return {Promise<JobQueue<T>>} - this queue
+     * @return {JobQueue<T>} - this queue
      */
-    public push(job: T, options?: PushOptions) {
+    public push(job: T, options?: PushOptions): JobQueuePublisher<T> {
         options = options || {} as PushOptions;
-
-        if (!this.handler) {
-            throw new TypeError(
-                'Message handler is not set, can not enqueue data!',
-            );
-        }
 
         this.imq.send(this.name, {
             job: job as unknown as AnyJson,
@@ -186,24 +278,45 @@ export default class JobQueue<T> {
 
         return this;
     }
+}
+
+// noinspection JSUnusedGlobalSymbols
+/**
+ * Implements simple scheduled job queue worker. Job queue worker is only
+ * responsible for processing queue messages.
+ */
+export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
+    implements AnyJobQueueWorker<JobQueueWorker<T>, T>
+{
+    /**
+     * Constructor. Instantiates new JobQueue instance.
+     *
+     * @constructor
+     * @param {JobQueueOptions} options
+     */
+    public constructor(options: JobQueueOptions) {
+        super(options);
+
+        this.imq = IMQ.create(
+            options.name,
+            toIMQOptions(options, this.logger),
+            IMQMode.WORKER,
+        );
+    }
 
     /**
      * Sets up job handler, which is called when the job is popped from this
      * queue.
      *
      * @param {JobQueuePopHandler<T>} handler - job pop handler
-     * @return {JobQueue<T>} - this queue
+     * @return {JobQueueWorker<T>} - this queue
      */
-    public onPop(handler: JobQueuePopHandler<T>): JobQueue<T> {
+    public onPop(handler: JobQueuePopHandler<T>): JobQueueWorker<T> {
         this.handler = handler;
         this.imq.removeAllListeners('message');
         this.imq.on('message', async (message: any) => {
             const { job, expire, delay } = message;
             let rescheduleDelay: number | void | undefined | Promise<any>;
-
-            if (typeof expire === 'number' && expire <= Date.now()) {
-                return ; // remove job from queue
-            }
 
             try {
                 rescheduleDelay = this.handler(job);
@@ -220,11 +333,86 @@ export default class JobQueue<T> {
                 this.logger.log('Error handling job:', err);
             }
 
+            if (typeof expire === 'number' && expire <= Date.now()) {
+                return ; // remove job from queue
+            }
+
             if (typeof rescheduleDelay === 'number' && rescheduleDelay >= 0) {
                 await this.imq.send(this.name, message, rescheduleDelay);
             }
         });
 
         return this;
+    }
+}
+
+// noinspection JSUnusedGlobalSymbols
+/**
+ * Implements simple scheduled job queue. Job scheduling is optional. It may
+ * process jobs immediately or after specified delay for particular job.
+ * It also allows to define max lifetime of the job in a queue, after which
+ * the job is removed from a queue.
+ * Supports graceful shutdown, if TERM or SIGINT is sent to the process.
+ */
+export default class JobQueue<T> extends BaseJobQueue<JobQueue<T>, T>
+implements
+    AnyJobQueueWorker<JobQueue<T>, T>,
+    AnyJobQueuePublisher<JobQueue<T>, T>
+{
+    /**
+     * Constructor. Instantiates new JobQueue instance.
+     *
+     * @constructor
+     * @param {JobQueueOptions} options
+     */
+    public constructor(options: JobQueueOptions) {
+        super(options);
+
+        this.imq = IMQ.create(options.name, toIMQOptions(options, this.logger));
+    }
+
+    /**
+     * Starts processing job queue. Throws if handler is not set before start.
+     *
+     * @throws {TypeError}
+     * @return {Promise<T>} - this queue
+     */
+    public async start(): Promise<JobQueue<T>> {
+        if (!this.handler) {
+            throw new TypeError(
+                'Message handler is not set, can not start job queue!',
+            );
+        }
+
+        return await super.start();
+    }
+
+    /**
+     * Pushes new job to this queue. Throws if handler is not set.
+     *
+     * @throws {TypeError}
+     * @param {T} job - job data itself of user defined type
+     * @param {PushOptions} options - push options, like delay and ttl for job
+     * @return {JobQueue<T>} - this queue
+     */
+    public push(job: T, options?: PushOptions): JobQueue<T> {
+        if (!this.handler) {
+            throw new TypeError(
+                'Message handler is not set, can not enqueue data!',
+            );
+        }
+
+        return JobQueuePublisher.prototype.push.call(this, job, options);
+    }
+
+    /**
+     * Sets up job handler, which is called when the job is popped from this
+     * queue.
+     *
+     * @param {JobQueuePopHandler<T>} handler - job pop handler
+     * @return {JobQueue<T>} - this queue
+     */
+    public onPop(handler: JobQueuePopHandler<T>): JobQueue<T> {
+        return JobQueueWorker.prototype.onPop.call(this, handler);
     }
 }
