@@ -323,7 +323,8 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
 
                 if (rescheduleDelay &&
                     typeof rescheduleDelay === 'object' &&
-                    rescheduleDelay.then
+                    rescheduleDelay &&
+                    (rescheduleDelay as any).then
                 ) {
                     // it's promise
                     rescheduleDelay = await rescheduleDelay;
