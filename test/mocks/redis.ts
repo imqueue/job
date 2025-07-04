@@ -1,24 +1,29 @@
 /*!
  * IMQ Unit Test Mocks: redis
  *
- * Copyright (c) 2018, imqueue.com <support@imqueue.com>
+ * I'm Queue Software Project
+ * Copyright (C) 2025  imqueue.com <support@imqueue.com>
  *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
  *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
- * REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
- * INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
- * LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
- * OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * If you want to use this code in a closed source (commercial) project, you can
+ * purchase a proprietary commercial license. Please contact us at
+ * <support@imqueue.com> to get commercial licensing options.
  */
 import * as mock from 'mock-require';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
-import { IMulti, IRedisClient } from '@imqueue/core';
 
 function sha1(str: string) {
     let sha: crypto.Hash = crypto.createHash('sha1');
@@ -27,7 +32,7 @@ function sha1(str: string) {
 }
 
 /**
- * @implements {IRedisClient}
+ * @implements {Redis}
  */
 export class RedisClientMock extends EventEmitter {
     private static __queues__: any = {};
@@ -38,12 +43,18 @@ export class RedisClientMock extends EventEmitter {
     private __name: string = '';
     // noinspection JSUnusedGlobalSymbols
     public connected: boolean = true;
+    public status = 'ready';
 
-    constructor() {
+    constructor(options: any = {}) {
         super();
         setTimeout(() => {
             this.emit('ready', this);
         });
+
+        if (options.connectionName) {
+            this.__name = options.connectionName;
+            RedisClientMock.__clientList[options.connectionName] = true;
+        }
     }
 
     // noinspection JSUnusedGlobalSymbols
@@ -52,15 +63,15 @@ export class RedisClientMock extends EventEmitter {
     public quit() {}
 
     // noinspection JSMethodCanBeStatic
-    public set(...args: any[]): boolean {
+    public set(...args: any[]): number {
         const [key, val] = args;
         RedisClientMock.__keys[key] = val;
-        args.pop()(null, 1);
-        return true;
+        this.cbExecute(args.pop(), null, 1);
+        return 1;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public setnx(...args: any[]): boolean {
+    public setnx(...args: any[]): number {
         const self = RedisClientMock;
         const key = args.shift();
         let result = 0;
@@ -70,55 +81,67 @@ export class RedisClientMock extends EventEmitter {
                 result = 1;
             }
         }
-        args.pop()(null, result);
-        return true;
+
+        this.cbExecute(args.pop(), null, result);
+
+        return result;
     }
 
     // noinspection TypescriptExplicitMemberType,JSMethodCanBeStatic
-    public lpush(key: string, value: any, cb?: any): boolean {
+    public lpush(key: string, value: any, cb?: any): number {
         const self = RedisClientMock;
         if (!self.__queues__[key]) {
             self.__queues__[key] = [];
         }
         self.__queues__[key].push(value);
-        cb(null, 1);
-        return true;
+        this.cbExecute(cb, null, 1);
+        return 1;
     }
 
-    public brpop(...args: any[]): boolean {
+    public async brpop(...args: any[]): Promise<string[]> {
         const [key, timeout, cb] = args;
         const q = RedisClientMock.__queues__[key] || [];
         if (!q.length) {
             this.__rt && clearTimeout(this.__rt);
-            this.__rt = setTimeout(() => this.brpop(
-                key, timeout, cb
-            ), timeout || 100);
+
+            return new Promise(resolve => {
+                this.__rt = setTimeout(() => resolve(this.brpop(
+                    key, timeout, cb,
+                )), timeout || 100);
+            });
         } else {
-            cb && cb(null, [key, q.shift()]);
+            const result = [key, q.shift()];
+
+            this.cbExecute(cb, null, [key, q.shift()]);
+
+            return result;
         }
-        return true;
     }
 
-    public brpoplpush(
+    public async brpoplpush(
         from: string,
         to: string,
         timeout: number,
         cb?: Function
-    ): boolean {
+    ): Promise<string> {
         const fromQ = RedisClientMock.__queues__[from] =
             RedisClientMock.__queues__[from] || [];
         const toQ = RedisClientMock.__queues__[to] =
             RedisClientMock.__queues__[to] || [];
         if (!fromQ.length) {
             this.__rt && clearTimeout(this.__rt);
-            this.__rt = setTimeout(() => this.brpoplpush(
-                from, to, timeout, cb
-            ), timeout || 100);
+
+            return new Promise(resolve => {
+                this.__rt = setTimeout(() => resolve(this.brpoplpush(
+                    from, to, timeout, cb,
+                )), timeout || 100);
+            });
         } else {
             toQ.push(fromQ.shift());
             cb && cb(null, '1');
+
+            return '1';
         }
-        return true;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
@@ -126,16 +149,17 @@ export class RedisClientMock extends EventEmitter {
         key: string,
         start: number,
         stop: number,
-        cb?: Function
+        cb?: Function,
     ): boolean {
         const q = RedisClientMock.__queues__[key] =
             RedisClientMock.__queues__[key] || [];
-        cb && cb(null, q.splice(start, stop));
-        return true;
+        const result = q.splice(start, stop);
+        this.cbExecute(cb, null, result);
+        return result;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public scan(...args: any[]): boolean {
+    public scan(...args: any[]): (string | string[])[] {
         const cb = args.pop();
         const qs = RedisClientMock.__queues__;
         const found: string[] = [];
@@ -144,74 +168,87 @@ export class RedisClientMock extends EventEmitter {
                 found.push(q);
             }
         }
-        cb && cb(null, ['0', found]);
-        return true;
+        const result = ['0', found];
+        this.cbExecute(cb, null, result);
+        return result;
     }
 
     // noinspection JSMethodCanBeStatic
-    public script(...args: any[]): boolean {
+    public script(...args: any[]): unknown {
         const cmd = args.shift();
-        const script = args.shift();
-        let hash: any = '';
-        if (cmd === 'load') {
-            hash = sha1(script);
-            RedisClientMock.__scripts[hash] = script;
+        const scriptOrHash = args.shift();
+        const cb = args.pop();
+        const isCb = typeof cb === 'function';
+
+        if (cmd === 'LOAD') {
+            const hash = sha1(scriptOrHash);
+            RedisClientMock.__scripts[hash] = scriptOrHash;
+            isCb && cb(null, hash);
+            return hash;
         }
-        if (cmd === 'exists') {
-            hash = RedisClientMock.__scripts[hash] !== undefined;
+        if (cmd === 'EXISTS') {
+            const hash = RedisClientMock.__scripts[scriptOrHash] !== undefined;
+
+            isCb && cb(null, hash);
+
+            return [Number(hash)];
         }
-        args.pop()(null, hash);
-        return true;
+
+        return [0];
     }
 
     // noinspection JSUnusedGlobalSymbols
-    public client(...args: any[]): boolean {
+    public client(...args: any[]): string | boolean {
         const self = RedisClientMock;
-        const cb = args.pop();
         const cmd = args.shift();
+        const cb = args.pop();
         const name = args.shift();
-        if (cmd === 'list') {
-            return cb(null, Object.keys(self.__clientList)
-                .map((name: string, id: number) => `id=${id} name=${name}`)
-                .join('\n'));
+
+        if (cmd === 'LIST') {
+            const result = Object.keys(self.__clientList)
+            .map((name: string, id: number) => `id=${id} name=${name}`)
+            .join('\n');
+
+            this.cbExecute(cb, null, result);
+            return result;
         }
-        else if (cmd === 'setname') {
+        else if (cmd === 'SETNAME') {
             this.__name = name;
             self.__clientList[name] = true;
         }
 
-        cb(null, true);
+        this.cbExecute(cb, null, true);
         return true;
     }
 
     // noinspection JSMethodCanBeStatic
     public exists(...args: any[]): boolean {
         const key = args.shift();
-        args.pop()(null, RedisClientMock.__keys[key] !== undefined);
-        return true;
+        const result = RedisClientMock.__keys[key] !== undefined;
+        this.cbExecute(args.pop(), null, result);
+        return result;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public psubscribe(...args: any[]): boolean {
-        args.pop()(null, 1);
-        return true;
+    public psubscribe(...args: any[]): number {
+        this.cbExecute(args.pop(), null, 1);
+        return 1;
     }
 
-    public punsubscribe(...args: any[]): boolean {
-        args.pop()(null, 1);
-        return true;
+    public punsubscribe(...args: any[]): number {
+        this.cbExecute(args.pop(), null, 1);
+        return 1;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
     public evalsha(...args: any[]): boolean {
-        args.pop()();
+        this.cbExecute(args.pop());
         return true;
     }
 
     // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public del(...args: any[]): boolean {
+    public del(...args: any[]): number {
         const self = RedisClientMock;
-        const cb = args.pop();
         let count = 0;
         for (let key of args) {
             if (self.__keys[key] !== undefined) {
@@ -223,8 +260,8 @@ export class RedisClientMock extends EventEmitter {
                 count++;
             }
         }
-        cb(null, count);
-        return true;
+        this.cbExecute(args.pop(), count);
+        return count;
     }
 
     // noinspection JSUnusedGlobalSymbols
@@ -235,12 +272,12 @@ export class RedisClientMock extends EventEmitter {
             const toKey = key.split(/:/).slice(0,2).join(':');
             this.lpush(toKey, value);
         }, timeout);
-        cb && cb();
+        this.cbExecute(cb);
         return true;
     }
 
     // noinspection JSUnusedGlobalSymbols
-    public unref(): boolean {
+    public disconnect(): boolean {
         delete RedisClientMock.__clientList[this.__name];
         if (this.__rt) {
             clearTimeout(this.__rt);
@@ -253,17 +290,17 @@ export class RedisClientMock extends EventEmitter {
     public config(): boolean {
         return true;
     }
+
+    private cbExecute(cb: any, ...args: any[]): void {
+        if (typeof cb === 'function') {
+            cb(...args);
+        }
+    }
 }
 
-/**
- * @implements {IMulti}
- */
-export class RedisMultiMock extends EventEmitter {}
-
-mock('redis', {
-    createClient() { return new RedisClientMock() },
-    RedisClient: RedisClientMock,
-    Multi: RedisMultiMock
+mock('ioredis', {
+    default: RedisClientMock,
+    Redis: RedisClientMock,
 });
 
-export * from 'redis';
+export * from 'ioredis';

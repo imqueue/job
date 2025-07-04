@@ -1,8 +1,8 @@
 # Simple Job Queue (@imqueue/job)
 
-[![Build Status](https://travis-ci.org/imqueue/job.svg?branch=master)](https://travis-ci.org/imqueue/job) 
+[![Build Status](https://img.shields.io/github/actions/workflow/status/imqueue/job/build.yml)](https://github.com/imqueue/job)
 [![Known Vulnerabilities](https://snyk.io/test/github/imqueue/job/badge.svg?targetFile=package.json)](https://snyk.io/test/github/imqueue/job?targetFile=package.json)
-[![License](https://img.shields.io/badge/license-ISC-blue.svg)](https://rawgit.com/imqueue/core/master/LICENSE)
+[![License](https://img.shields.io/badge/license-GPL-blue.svg)](https://rawgit.com/imqueue/core/master/LICENSE)
 
 Simple job queue using JSON messaging for managing backand background jobs.
 Backed up by Redis.
@@ -68,4 +68,5 @@ new JobQueueWorker<string>({ name: 'CustomTestJob' })
 
 ## License
 
-[ISC](https://rawgit.com/imqueue/job/master/LICENSE)
+This project is licensed under the GNU General Public License v3.0.
+See the [LICENSE](LICENSE)
