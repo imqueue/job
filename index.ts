@@ -279,7 +279,7 @@ implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
             ...(options.ttl ? { expire: Date.now() + options.ttl } : {}),
             ...(options.delay ? { delay: options.delay } : {}),
         }, options.delay).catch(err =>
-            this.logger.log('JobQueue push error:', err),
+            this.logger.log('[JobQueue] push error:', err),
         );
 
         return this;
@@ -321,6 +321,13 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
         this.handler = handler;
         this.imq.removeAllListeners('message');
         this.imq.on('message', async (message: any) => {
+            if (typeof message !== 'object' || !message) {
+                this.logger.warn(
+                    '[JobQueue] Invalid message received:',
+                    JSON.stringify(message),
+                );
+            }
+
             const { job, expire, delay } = message;
             let rescheduleDelay: number | void | undefined | Promise<any>;
 
@@ -337,7 +344,7 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
                 }
             } catch (err) {
                 rescheduleDelay = delay;
-                this.logger.log('Error handling job:', err);
+                this.logger.log('[JobQueue] Error handling job:', err);
             }
 
             if (typeof expire === 'number' && expire <= Date.now()) {
@@ -387,7 +394,7 @@ implements
     public async start(): Promise<JobQueue<T>> {
         if (!this.handler) {
             throw new TypeError(
-                'Message handler is not set, can not start job queue!',
+                '[JobQueue] Message handler is not set, can not start job queue!',
             );
         }
 
@@ -405,7 +412,7 @@ implements
     public push(job: T, options?: PushOptions): JobQueue<T> {
         if (!this.handler) {
             throw new TypeError(
-                'Message handler is not set, can not enqueue data!',
+                '[JobQueue] Message handler is not set, can not enqueue data!',
             );
         }
 
