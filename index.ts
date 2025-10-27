@@ -88,6 +88,13 @@ export interface JobQueueOptions {
      * By default is "imq-job".
      */
     prefix?: string;
+
+    /**
+     * Verbose logging mode.
+     * Optional.
+     * By default is false.
+     */
+    verbose?: boolean;
 }
 
 export interface JobQueuePopHandler<T> {
@@ -236,6 +243,10 @@ function toIMQOptions(
         safeDeliveryTtl: typeof options.safeLockTtl === 'undefined'
             ? 10000 : options.safeLockTtl,
         prefix: options.prefix || 'imq-job',
+        verbose: typeof options.verbose === 'undefined'
+            ? false
+            : options.verbose
+        ,
         logger,
     };
 }
