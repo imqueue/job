@@ -46,17 +46,32 @@ export interface JobQueueOptions {
      * Connection params of the queue engine cluster (typically -
      * host and port). By default the broker is redis.
      * Optional.
-     * By default is [{ host: "localhost", port: 6379 }].
      *
+     * @default [{ host: "localhost", port: 6379 }]
      * @type {Array<{host: string, port: number}>}
      */
     cluster?: { host: string; port: number; }[];
+
+    /**
+     * Message queue username
+     *
+     * @type {string}
+     */
+    username?: string;
+
+    /**
+     * Message queue password
+     *
+     * @type {string}
+     */
+    password?: string;
 
     /**
      * Logger to be used for producing log and error messages.
      * Optional.
      * By default is console.
      *
+     * @default console
      * @type {ILogger}
      */
     logger?: ILogger;
@@ -67,8 +82,8 @@ export interface JobQueueOptions {
      * fails or dies - job data is re-queued for future processing by another
      * worker.
      * Optional.
-     * Default is true.
      *
+     * @default true
      * @type {boolean}
      */
     safe?: boolean;
@@ -78,23 +93,38 @@ export interface JobQueueOptions {
      * If worker does not finish processing after this TTL - job is re-queued
      * for other workers to be processed.
      * Optional.
-     * By default is 10000.
+     *
+     * @default 10000
+     * @type {number}
      */
     safeLockTtl?: number;
 
     /**
      * Job queue prefix in queue broker.
      * Optional.
-     * By default is "imq-job".
+     *
+     * @default "imq-job"
+     * @type {string}
      */
     prefix?: string;
 
     /**
-     * Verbose logging mode.
-     * Optional.
-     * By default is false.
+     * Enables/disables verbose logging
+     *
+     * @default false
+     * @type {boolean}
      */
     verbose?: boolean;
+
+    /**
+     * Enables/disables extended verbose logging. The output may contain
+     * sensitive information, so use it with caution. Does not work if a verbose
+     * option is disabled.
+     *
+     * @default false
+     * @type {boolean}
+     */
+    verboseExtended?: boolean;
 }
 
 export interface JobQueuePopHandler<T> {
@@ -237,16 +267,16 @@ function toIMQOptions(
 ): Partial<IMQOptions> {
     return {
         cluster: options.cluster,
+        username: options.username,
+        password: options.password,
         cleanup: false,
         safeDelivery: typeof options.safe === 'undefined'
             ? true : options.safe,
         safeDeliveryTtl: typeof options.safeLockTtl === 'undefined'
             ? 10000 : options.safeLockTtl,
         prefix: options.prefix || 'imq-job',
-        verbose: typeof options.verbose === 'undefined'
-            ? false
-            : options.verbose
-        ,
+        verbose: options.verbose,
+        verboseExtended: options.verboseExtended,
         logger,
     };
 }
