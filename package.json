@@ -36,7 +36,7 @@
   "author": "imqueue.com <support@imqueue.com> (https://imqueue.com)",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "@imqueue/core": "^2.0.17"
+    "@imqueue/core": "^2.0.18"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
@@ -44,7 +44,7 @@
     "@types/chai": "^5.2.2",
     "@types/mocha": "^10.0.10",
     "@types/mock-require": "^3.0.0",
-    "@types/node": "^24.3.1",
+    "@types/node": "^24.9.2",
     "@types/sinon": "^17.0.4",
     "@typescript-eslint/eslint-plugin": "^8.43.0",
     "@typescript-eslint/parser": "^8.43.0",
