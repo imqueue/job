@@ -21,5 +21,25 @@
  * purchase a proprietary commercial license. Please contact us at
  * <support@imqueue.com> to get commercial licensing options.
  */
-export * from './redis';
-export * from './logger';
+import { mock } from 'node:test';
+import { RedisClientMock } from './redis.js';
+
+// preloaded via `node --import ./test/mocks/index.js` so the mock is
+// registered before any test file graph links (see package.json scripts)
+// the mock must serve both worlds: ESM sources bind the named `Redis`
+// export directly, while CommonJS-style consumers read properties off the
+// default (`module.exports`) object — so both shapes are registered
+mock.module('ioredis', {
+    cache: false,
+    defaultExport: {
+        __esModule: true,
+        default: RedisClientMock,
+        Redis: RedisClientMock,
+    },
+    namedExports: {
+        Redis: RedisClientMock,
+    },
+});
+
+export * from './logger.js';
+export * from './redis.js';

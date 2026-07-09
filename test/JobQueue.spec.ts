@@ -21,69 +21,79 @@
  * purchase a proprietary commercial license. Please contact us at
  * <support@imqueue.com> to get commercial licensing options.
  */
-import { logger } from './mocks';
-import { expect } from 'chai';
-import JobQueue from '..';
-import * as sinon from 'sinon';
+import { describe, it, beforeEach, afterEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { spy as makeSpy } from './mocks/spy.js';
+import './mocks/index.js';
+import { logger } from './mocks/index.js';
+import JobQueue from '../index.js';
 
 describe('JobQueue', () => {
     it('should be a class', () => {
-        expect(typeof JobQueue).equals('function');
+        assert.equal(typeof JobQueue, 'function');
     });
 
     describe('constructor()', () => {
         it('should throw if name is not provided', () => {
-            expect(() => new (JobQueue as any)()).to.throw;
+            assert.throws(() => new (JobQueue as any)());
         });
 
         it('should not throw if name provided as minimum options', () => {
-            expect(() => new JobQueue({ name: 'Test' })).to.not.throw;
+            assert.doesNotThrow(() => new JobQueue({ name: 'Test' }));
         });
 
         it('should use given logger', () => {
             const queue: any = new JobQueue({ name: 'Test', logger });
-            expect(queue.logger).equals(logger);
+            assert.equal(queue.logger, logger);
         });
 
         it('should use console as default logger', () => {
             const queue: any = new JobQueue({ name: 'Test' });
-            expect(queue.logger).equals(console);
+            assert.equal(queue.logger, console);
         });
     });
 
     describe('name', () => {
         it('should match to given name', () => {
-            expect(new JobQueue({ name: 'TestName' }).name).equals('TestName');
+            assert.equal(new JobQueue({ name: 'TestName' }).name, 'TestName');
         });
 
         it('should be read-only', () => {
             const queue: any = new JobQueue({ name: 'Test' });
 
-            expect(() => queue.name = 'TestName').to.throw;
+            assert.throws(() => (queue.name = 'TestName'));
         });
     });
 
     describe('start()', () => {
         let queue: JobQueue<any>;
 
-        beforeEach(() => queue = new JobQueue<any>({ name: 'Test', logger }));
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => await queue.destroy());
 
         it('should throw if handler is not set', async () => {
             let err: any;
 
-            try { await queue.start() } catch(e) { err = e }
+            try {
+                await queue.start();
+            } catch (e) {
+                err = e;
+            }
 
-            expect(err).not.to.be.undefined;
+            assert.notEqual(err, undefined);
         });
 
         it('should not throw if handler is set', async () => {
             let err: any;
 
             (queue as any).handler = () => {};
-            try { await queue.start() } catch(e) { err = e }
+            try {
+                await queue.start();
+            } catch (e) {
+                err = e;
+            }
 
-            expect(err).to.be.undefined;
+            assert.equal(err, undefined);
         });
 
         it('should return this queue', async () => {
@@ -91,16 +101,16 @@ describe('JobQueue', () => {
 
             const res = await queue.start();
 
-            expect(res).equals(queue);
+            assert.equal(res, queue);
         });
 
         it('should actually start', async () => {
-            const spy = sinon.spy((queue as any).imq, 'start');
+            const spy = makeSpy((queue as any).imq, 'start');
 
             (queue as any).handler = () => {};
             await queue.start();
 
-            expect(spy.calledOnce).to.be.true;
+            assert.equal(spy.calledOnce, true);
             spy.restore();
         });
     });
@@ -108,21 +118,21 @@ describe('JobQueue', () => {
     describe('stop()', () => {
         let queue: JobQueue<any>;
 
-        beforeEach(() => queue = new JobQueue<any>({ name: 'Test', logger }));
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => await queue.destroy());
 
         it('should return this queue', async () => {
             const res = await queue.stop();
 
-            expect(res).equals(queue);
+            assert.equal(res, queue);
         });
 
         it('should actually stop', async () => {
-            const spy = sinon.spy((queue as any).imq, 'stop');
+            const spy = makeSpy((queue as any).imq, 'stop');
 
             await queue.stop();
 
-            expect(spy.calledOnce).to.be.true;
+            assert.equal(spy.calledOnce, true);
             spy.restore();
         });
     });
@@ -130,21 +140,21 @@ describe('JobQueue', () => {
     describe('destroy()', () => {
         let queue: JobQueue<any>;
 
-        beforeEach(() => queue = new JobQueue<any>({ name: 'Test', logger }));
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => await queue.destroy());
 
         it('should return undefined', async () => {
             const res = await queue.destroy();
 
-            expect(res).to.be.undefined;
+            assert.equal(res, undefined);
         });
 
         it('should actually destroy', async () => {
-            const spy = sinon.spy((queue as any).imq, 'destroy');
+            const spy = makeSpy((queue as any).imq, 'destroy');
 
             await queue.destroy();
 
-            expect(spy.calledOnce).to.be.true;
+            assert.equal(spy.calledOnce, true);
             spy.restore();
         });
     });
@@ -152,50 +162,58 @@ describe('JobQueue', () => {
     describe('push()', () => {
         let queue: JobQueue<any>;
 
-        beforeEach(() => queue = new JobQueue<any>({ name: 'Test', logger }));
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => await queue.destroy());
 
         it('should throw if handler is not set', async () => {
             let err: any;
 
-            try { await queue.push('') } catch(e) { err = e }
+            try {
+                await queue.push('');
+            } catch (e) {
+                err = e;
+            }
 
-            expect(err).not.to.be.undefined;
+            assert.notEqual(err, undefined);
         });
 
         it('should not throw if handler is set', async () => {
             let err: any;
 
             (queue as any).handler = () => {};
-            try { await queue.push('') } catch(e) { err = e }
+            try {
+                await queue.push('');
+            } catch (e) {
+                err = e;
+            }
 
-            expect(err).to.be.undefined;
+            assert.equal(err, undefined);
         });
 
         it('should actually push', async () => {
-            const spy = sinon.spy((queue as any).imq, 'send');
+            const spy = makeSpy((queue as any).imq, 'send');
 
             (queue as any).handler = () => {};
             await queue.push('');
 
-            expect(spy.calledOnce).to.be.true;
+            assert.equal(spy.calledOnce, true);
             spy.restore();
         });
 
         it('should actually push with given ttl and delay', async () => {
-            const spy = sinon.spy((queue as any).imq, 'send');
+            const spy = makeSpy((queue as any).imq, 'send');
 
             (queue as any).handler = () => {};
             const now = Date.now();
             await queue.push('', { ttl: 100, delay: 10 });
             const [[name, { job, expire, delay }, jobDelay]] = spy.args;
 
-            expect(name).equals('Test');
-            expect(job).equals('');
-            expect(expire).lte(now + 101);
-            expect(expire).gte(now + 100);
-            expect(delay).equals(10);
-            expect(jobDelay).equals(10);
+            assert.equal(name, 'Test');
+            assert.equal(job, '');
+            assert.ok(expire <= now + 101);
+            assert.ok(expire >= now + 100);
+            assert.equal(delay, 10);
+            assert.equal(jobDelay, 10);
 
             spy.restore();
         });
@@ -204,7 +222,7 @@ describe('JobQueue', () => {
     describe('onPop', () => {
         let queue: JobQueue<any>;
 
-        beforeEach(() => queue = new JobQueue<any>({ name: 'Test', logger }));
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => await queue.destroy());
 
         it('should properly set handler', () => {
@@ -213,8 +231,8 @@ describe('JobQueue', () => {
             queue.onPop(handler);
             queue.onPop(handler);
 
-            expect((queue as any).handler).equals(handler);
-            expect((queue as any).imq.listenerCount('message')).equals(1);
+            assert.equal((queue as any).handler, handler);
+            assert.equal((queue as any).imq.listenerCount('message'), 1);
         });
 
         // todo: add more coverage

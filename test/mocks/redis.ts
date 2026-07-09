@@ -21,18 +21,17 @@
  * purchase a proprietary commercial license. Please contact us at
  * <support@imqueue.com> to get commercial licensing options.
  */
-import * as mock from 'mock-require';
-import { EventEmitter } from 'events';
-import * as crypto from 'crypto';
+import { EventEmitter } from 'node:events';
+import { createHash, Hash } from 'node:crypto';
 
 function sha1(str: string) {
-    let sha: crypto.Hash = crypto.createHash('sha1');
+    let sha: Hash = createHash('sha1');
     sha.update(str);
     return sha.digest('hex');
 }
 
 /**
- * @implements {Redis}
+ * @implements {IRedisClient}
  */
 export class RedisClientMock extends EventEmitter {
     private static __queues__: any = {};
@@ -41,12 +40,13 @@ export class RedisClientMock extends EventEmitter {
     private static __keys: any = {};
     private static __scripts: any = {};
     private __name: string = '';
-    // noinspection JSUnusedGlobalSymbols
     public connected: boolean = true;
     public status = 'ready';
+    public options: any;
 
     constructor(options: any = {}) {
         super();
+        this.options = options;
         setTimeout(() => {
             this.emit('ready', this);
         });
@@ -57,25 +57,28 @@ export class RedisClientMock extends EventEmitter {
         }
     }
 
-    // noinspection JSUnusedGlobalSymbols
     public end() {}
-    // noinspection JSUnusedGlobalSymbols
-    public quit() {}
 
-    // noinspection JSMethodCanBeStatic
-    public set(...args: any[]): number {
+    public quit() {
+        return new Promise(resolve => resolve(undefined));
+    }
+
+    public connect() {
+        return new Promise(resolve => resolve(undefined));
+    }
+
+    public set(...args: any[]): Promise<number> {
         const [key, val] = args;
         RedisClientMock.__keys[key] = val;
         this.cbExecute(args.pop(), null, 1);
-        return 1;
+        return new Promise(resolve => resolve(1));
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
     public setnx(...args: any[]): number {
         const self = RedisClientMock;
         const key = args.shift();
         let result = 0;
-        if (/:watch:lock$/.test(key)) {
+        if (String(key).endsWith(':watch:lock')) {
             if (typeof self.__keys[key] === 'undefined') {
                 self.__keys[key] = args.shift();
                 result = 1;
@@ -87,7 +90,6 @@ export class RedisClientMock extends EventEmitter {
         return result;
     }
 
-    // noinspection TypescriptExplicitMemberType,JSMethodCanBeStatic
     public lpush(key: string, value: any, cb?: any): number {
         const self = RedisClientMock;
         if (!self.__queues__[key]) {
@@ -102,12 +104,15 @@ export class RedisClientMock extends EventEmitter {
         const [key, timeout, cb] = args;
         const q = RedisClientMock.__queues__[key] || [];
         if (!q.length) {
-            this.__rt && clearTimeout(this.__rt);
+            if (this.__rt) {
+                clearTimeout(this.__rt);
+            }
 
             return new Promise(resolve => {
-                this.__rt = setTimeout(() => resolve(this.brpop(
-                    key, timeout, cb,
-                )), timeout || 100);
+                this.__rt = setTimeout(
+                    () => resolve(this.brpop(key, timeout, cb)),
+                    timeout || 100,
+                );
             });
         } else {
             const result = [key, q.shift()];
@@ -122,43 +127,107 @@ export class RedisClientMock extends EventEmitter {
         from: string,
         to: string,
         timeout: number,
-        cb?: Function
+        cb?: Function,
     ): Promise<string> {
-        const fromQ = RedisClientMock.__queues__[from] =
-            RedisClientMock.__queues__[from] || [];
-        const toQ = RedisClientMock.__queues__[to] =
-            RedisClientMock.__queues__[to] || [];
+        const fromQ = (RedisClientMock.__queues__[from] =
+            RedisClientMock.__queues__[from] || []);
+        const toQ = (RedisClientMock.__queues__[to] =
+            RedisClientMock.__queues__[to] || []);
         if (!fromQ.length) {
-            this.__rt && clearTimeout(this.__rt);
+            if (this.__rt) {
+                clearTimeout(this.__rt);
+            }
 
             return new Promise(resolve => {
-                this.__rt = setTimeout(() => resolve(this.brpoplpush(
-                    from, to, timeout, cb,
-                )), timeout || 100);
+                this.__rt = setTimeout(
+                    () => resolve(this.brpoplpush(from, to, timeout, cb)),
+                    timeout || 100,
+                );
             });
         } else {
             toQ.push(fromQ.shift());
-            cb && cb(null, '1');
+            if (cb) {
+                cb(null, '1');
+            }
 
             return '1';
         }
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
+    public async lmove(
+        from: string,
+        to: string,
+        _fromSide?: string,
+        _toSide?: string,
+        cb?: Function,
+    ): Promise<string | null> {
+        const qs = RedisClientMock.__queues__;
+        const fromQ = (qs[from] = qs[from] || []);
+
+        if (!fromQ.length) {
+            this.cbExecute(cb, null, null);
+
+            return null;
+        }
+
+        const element = fromQ.shift();
+
+        (qs[to] = qs[to] || []).push(element);
+        this.cbExecute(cb, null, element);
+
+        return element;
+    }
+
+    public async blmove(
+        from: string,
+        to: string,
+        _fromSide?: string,
+        _toSide?: string,
+        timeout?: number,
+    ): Promise<string | null> {
+        const deadline = Date.now() + (Number(timeout) || 0.1) * 1000;
+
+        while (true) {
+            const qs = RedisClientMock.__queues__;
+            const fromQ = (qs[from] = qs[from] || []);
+
+            if (fromQ.length) {
+                const element = fromQ.shift();
+
+                (qs[to] = qs[to] || []).push(element);
+
+                return element;
+            }
+
+            if (Date.now() >= deadline) {
+                return null;
+            }
+
+            await new Promise(resolve => {
+                this.__rt = setTimeout(resolve, 25);
+            });
+        }
+    }
+
+    public llen(key: string, cb?: Function): number {
+        const q = RedisClientMock.__queues__[key] || [];
+        this.cbExecute(cb, null, q.length);
+        return q.length;
+    }
+
     public lrange(
         key: string,
         start: number,
         stop: number,
         cb?: Function,
     ): boolean {
-        const q = RedisClientMock.__queues__[key] =
-            RedisClientMock.__queues__[key] || [];
+        const q = (RedisClientMock.__queues__[key] =
+            RedisClientMock.__queues__[key] || []);
         const result = q.splice(start, stop);
         this.cbExecute(cb, null, result);
         return result;
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
     public scan(...args: any[]): (string | string[])[] {
         const cb = args.pop();
         const qs = RedisClientMock.__queues__;
@@ -173,7 +242,6 @@ export class RedisClientMock extends EventEmitter {
         return result;
     }
 
-    // noinspection JSMethodCanBeStatic
     public script(...args: any[]): unknown {
         const cmd = args.shift();
         const scriptOrHash = args.shift();
@@ -183,13 +251,17 @@ export class RedisClientMock extends EventEmitter {
         if (cmd === 'LOAD') {
             const hash = sha1(scriptOrHash);
             RedisClientMock.__scripts[hash] = scriptOrHash;
-            isCb && cb(null, hash);
+            if (isCb) {
+                cb(null, hash);
+            }
             return hash;
         }
         if (cmd === 'EXISTS') {
             const hash = RedisClientMock.__scripts[scriptOrHash] !== undefined;
 
-            isCb && cb(null, hash);
+            if (isCb) {
+                cb(null, hash);
+            }
 
             return [Number(hash)];
         }
@@ -197,7 +269,6 @@ export class RedisClientMock extends EventEmitter {
         return [0];
     }
 
-    // noinspection JSUnusedGlobalSymbols
     public client(...args: any[]): string | boolean {
         const self = RedisClientMock;
         const cmd = args.shift();
@@ -206,13 +277,12 @@ export class RedisClientMock extends EventEmitter {
 
         if (cmd === 'LIST') {
             const result = Object.keys(self.__clientList)
-            .map((name: string, id: number) => `id=${id} name=${name}`)
-            .join('\n');
+                .map((name: string, id: number) => `id=${id} name=${name}`)
+                .join('\n');
 
             this.cbExecute(cb, null, result);
             return result;
-        }
-        else if (cmd === 'SETNAME') {
+        } else if (cmd === 'SETNAME') {
             this.__name = name;
             self.__clientList[name] = true;
         }
@@ -221,7 +291,6 @@ export class RedisClientMock extends EventEmitter {
         return true;
     }
 
-    // noinspection JSMethodCanBeStatic
     public exists(...args: any[]): boolean {
         const key = args.shift();
         const result = RedisClientMock.__keys[key] !== undefined;
@@ -229,25 +298,22 @@ export class RedisClientMock extends EventEmitter {
         return result;
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public psubscribe(...args: any[]): number {
+    public psubscribe(...args: any[]): Promise<number> {
         this.cbExecute(args.pop(), null, 1);
-        return 1;
+        return new Promise(resolve => resolve(1));
     }
 
-    public punsubscribe(...args: any[]): number {
+    public punsubscribe(...args: any[]): Promise<number> {
         this.cbExecute(args.pop(), null, 1);
-        return 1;
+        return new Promise(resolve => resolve(1));
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
     public evalsha(...args: any[]): boolean {
         this.cbExecute(args.pop());
         return true;
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public del(...args: any[]): number {
+    public del(...args: any[]): Promise<number> {
         const self = RedisClientMock;
         let count = 0;
         for (let key of args) {
@@ -261,22 +327,20 @@ export class RedisClientMock extends EventEmitter {
             }
         }
         this.cbExecute(args.pop(), count);
-        return count;
+        return new Promise(resolve => resolve(count));
     }
 
-    // noinspection JSUnusedGlobalSymbols
     public zadd(...args: any[]): boolean {
         const [key, score, value, cb] = args;
         const timeout = score - Date.now();
         setTimeout(() => {
-            const toKey = key.split(/:/).slice(0,2).join(':');
+            const toKey = key.split(/:/).slice(0, 2).join(':');
             this.lpush(toKey, value);
         }, timeout);
         this.cbExecute(cb);
         return true;
     }
 
-    // noinspection JSUnusedGlobalSymbols
     public disconnect(): boolean {
         delete RedisClientMock.__clientList[this.__name];
         if (this.__rt) {
@@ -286,9 +350,21 @@ export class RedisClientMock extends EventEmitter {
         return true;
     }
 
-    // noinspection JSUnusedGlobalSymbols,JSMethodCanBeStatic
-    public config(): boolean {
-        return true;
+    public publish(channel: string, message: string, cb?: any): number {
+        this.cbExecute(cb, null, 1);
+        return 1;
+    }
+
+    public subscribe(channel: string, cb?: any): void {
+        this.cbExecute(cb, null, 1);
+    }
+
+    public unsubscribe(channel?: string, cb?: any): void {
+        this.cbExecute(cb, null, 1);
+    }
+
+    public config(): Promise<boolean> {
+        return new Promise(resolve => resolve(true));
     }
 
     private cbExecute(cb: any, ...args: any[]): void {
@@ -297,10 +373,3 @@ export class RedisClientMock extends EventEmitter {
         }
     }
 }
-
-mock('ioredis', {
-    default: RedisClientMock,
-    Redis: RedisClientMock,
-});
-
-export * from 'ioredis';

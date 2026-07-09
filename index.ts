@@ -22,11 +22,11 @@
  * <support@imqueue.com> to get commercial licensing options.
  */
 import IMQ, {
-    AnyJson,
-    ILogger,
-    IMessageQueue,
+    type AnyJson,
+    type ILogger,
+    type IMessageQueue,
     IMQMode,
-    IMQOptions,
+    type IMQOptions,
 } from '@imqueue/core';
 
 /**
@@ -50,7 +50,7 @@ export interface JobQueueOptions {
      * @default [{ host: "localhost", port: 6379 }]
      * @type {Array<{host: string, port: number}>}
      */
-    cluster?: { host: string; port: number; }[];
+    cluster?: { host: string; port: number }[];
 
     /**
      * Message queue username
@@ -201,14 +201,12 @@ export interface AnyJobQueuePublisher<T, U> {
  * Abstract job queue, handles base implementations of AnyJobQueue interface.
  */
 export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
-    protected imq: IMessageQueue;
-    protected handler: JobQueuePopHandler<U>;
+    protected imq!: IMessageQueue;
+    protected handler?: JobQueuePopHandler<U>;
 
     public readonly logger: ILogger;
 
-    protected constructor(
-        protected options: JobQueueOptions,
-    ) {
+    protected constructor(protected options: JobQueueOptions) {
         this.logger = options.logger || console;
     }
 
@@ -270,10 +268,11 @@ function toIMQOptions(
         username: options.username,
         password: options.password,
         cleanup: false,
-        safeDelivery: typeof options.safe === 'undefined'
-            ? true : options.safe,
-        safeDeliveryTtl: typeof options.safeLockTtl === 'undefined'
-            ? 10000 : options.safeLockTtl,
+        safeDelivery: typeof options.safe === 'undefined' ? true : options.safe,
+        safeDeliveryTtl:
+            typeof options.safeLockTtl === 'undefined'
+                ? 10000
+                : options.safeLockTtl,
         prefix: options.prefix || 'imq-job',
         verbose: options.verbose,
         verboseExtended: options.verboseExtended,
@@ -286,8 +285,9 @@ function toIMQOptions(
  * Implements simple scheduled job queue publisher. Job queue publisher is only
  * responsible for pushing queue messages.
  */
-export class JobQueuePublisher<T> extends BaseJobQueue<JobQueuePublisher<T>, T>
-implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
+export class JobQueuePublisher<T>
+    extends BaseJobQueue<JobQueuePublisher<T>, T>
+    implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
 {
     /**
      * Constructor. Instantiates new JobQueue instance.
@@ -313,15 +313,21 @@ implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
      * @return {JobQueue<T>} - this queue
      */
     public push(job: T, options?: PushOptions): JobQueuePublisher<T> {
-        options = options || {} as PushOptions;
+        options = options || ({} as PushOptions);
 
-        this.imq.send(this.name, {
-            job: job as unknown as AnyJson,
-            ...(options.ttl ? { expire: Date.now() + options.ttl } : {}),
-            ...(options.delay ? { delay: options.delay } : {}),
-        }, options.delay).catch(err =>
-            this.logger.log('[JobQueue] push error:', err),
-        );
+        this.imq
+            .send(
+                this.name,
+                {
+                    job: job as unknown as AnyJson,
+                    ...(options.ttl
+                        ? { expire: Date.now() + options.ttl }
+                        : {}),
+                    ...(options.delay ? { delay: options.delay } : {}),
+                },
+                options.delay,
+            )
+            .catch(err => this.logger.log('[JobQueue] push error:', err));
 
         return this;
     }
@@ -332,7 +338,8 @@ implements AnyJobQueuePublisher<JobQueuePublisher<T>, T>
  * Implements simple scheduled job queue worker. Job queue worker is only
  * responsible for processing queue messages.
  */
-export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
+export class JobQueueWorker<T>
+    extends BaseJobQueue<JobQueueWorker<T>, T>
     implements AnyJobQueueWorker<JobQueueWorker<T>, T>
 {
     /**
@@ -373,9 +380,10 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
             let rescheduleDelay: number | void | undefined | Promise<any>;
 
             try {
-                rescheduleDelay = this.handler(job);
+                rescheduleDelay = this.handler?.(job);
 
-                if (rescheduleDelay &&
+                if (
+                    rescheduleDelay &&
                     typeof rescheduleDelay === 'object' &&
                     rescheduleDelay &&
                     (rescheduleDelay as any).then
@@ -389,7 +397,7 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
             }
 
             if (typeof expire === 'number' && expire <= Date.now()) {
-                return ; // remove job from queue
+                return; // remove job from queue
             }
 
             if (typeof rescheduleDelay === 'number' && rescheduleDelay >= 0) {
@@ -409,10 +417,11 @@ export class JobQueueWorker<T> extends BaseJobQueue<JobQueueWorker<T>, T>
  * the job is removed from a queue.
  * Supports graceful shutdown, if TERM or SIGINT is sent to the process.
  */
-export default class JobQueue<T> extends BaseJobQueue<JobQueue<T>, T>
-implements
-    AnyJobQueueWorker<JobQueue<T>, T>,
-    AnyJobQueuePublisher<JobQueue<T>, T>
+export default class JobQueue<T>
+    extends BaseJobQueue<JobQueue<T>, T>
+    implements
+        AnyJobQueueWorker<JobQueue<T>, T>,
+        AnyJobQueuePublisher<JobQueue<T>, T>
 {
     /**
      * Constructor. Instantiates new JobQueue instance.
@@ -432,7 +441,7 @@ implements
      * @throws {TypeError}
      * @return {Promise<T>} - this queue
      */
-    public async start(): Promise<JobQueue<T>> {
+    public override async start(): Promise<JobQueue<T>> {
         if (!this.handler) {
             throw new TypeError(
                 '[JobQueue] Message handler is not set, can not start job queue!',
@@ -457,7 +466,11 @@ implements
             );
         }
 
-        return JobQueuePublisher.prototype.push.call(this, job, options);
+        return JobQueuePublisher.prototype.push.call(
+            this as unknown as JobQueuePublisher<T>,
+            job,
+            options,
+        ) as unknown as JobQueue<T>;
     }
 
     /**
@@ -468,6 +481,9 @@ implements
      * @return {JobQueue<T>} - this queue
      */
     public onPop(handler: JobQueuePopHandler<T>): JobQueue<T> {
-        return JobQueueWorker.prototype.onPop.call(this, handler);
+        return JobQueueWorker.prototype.onPop.call(
+            this as unknown as JobQueueWorker<T>,
+            handler,
+        ) as unknown as JobQueue<T>;
     }
 }
