@@ -35,7 +35,7 @@
   "bugs": {
     "url": "https://github.com/imqueue/job/issues"
   },
-  "homepage": "https://imqueue.com/",
+  "homepage": "https://imqueue.org/",
   "author": "imqueue.com <support@imqueue.com> (https://imqueue.com)",
   "license": "GPL-3.0-only",
   "dependencies": {
