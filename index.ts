@@ -78,9 +78,14 @@ export interface JobQueueOptions {
 
     /**
      * Safe message delivery or not? When safe delivery is enabled (by default)
-     * queue is processing jobs with guarantied job data delivery. If process
-     * fails or dies - job data is re-queued for future processing by another
-     * worker.
+     * a job is moved atomically out of the queue into a worker-owned key as it
+     * is popped, so a process that dies *before* it starts on that job leaves
+     * the job data behind to be re-queued for another worker instead of losing
+     * it.
+     * The guarantee covers that hand-off and not the processing: the key is
+     * released as soon as the job reaches the handler, so a worker killed
+     * part-way through `onPop` loses that attempt. Jobs are delivered
+     * at-least-once, so handlers should be idempotent.
      * Optional.
      *
      * @default true
@@ -90,8 +95,11 @@ export interface JobQueueOptions {
 
     /**
      * TTL in milliseconds of the job in worker queue during safe delivery.
-     * If worker does not finish processing after this TTL - job is re-queued
-     * for other workers to be processed.
+     * A worker key still present once this expires is treated as abandoned and
+     * its job is moved back onto the queue, so this bounds how long an
+     * abandoned hand-off takes to come back. It is not a processing deadline: a
+     * job that takes longer than this to handle is neither interrupted nor
+     * re-queued.
      * Optional.
      *
      * @default 10000
@@ -134,8 +142,9 @@ export interface JobQueuePopHandler<T> {
      * If it returns positive number it will be treated as new delay to
      * re-schedule message in the queue. Normally, if re-schedule is not needed
      * it should return nothing (undefined, void return).
-     * If worker goes down during the job processing, job will be re-scheduled
-     * after configured by options safeLockTtl.
+     * Re-scheduling on throw needs this process to still be alive: if the
+     * worker goes down while this handler is running, that attempt is lost —
+     * safe delivery guards the hand-off of a job, not its processing.
      *
      * @example
      * ```typescript
