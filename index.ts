@@ -79,7 +79,7 @@ export interface JobQueueOptions {
     /**
      * Safe message delivery or not? When safe delivery is enabled (by default)
      * a job is moved atomically out of the queue into a worker-owned key as it
-     * is popped, so a process that dies *before* it starts on that job leaves
+     * is popped, so a process that dies before it even starts on that job leaves
      * the job data behind to be re-queued for another worker instead of losing
      * it.
      * The guarantee covers that hand-off and not the processing: the key is
