@@ -23,7 +23,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { spy as makeSpy } from './mocks/spy.js';
+import { createSandbox, spy as makeSpy } from './mocks/spy.js';
 import './mocks/index.js';
 import { logger } from './mocks/index.js';
 import JobQueue from '../index.js';
@@ -234,7 +234,98 @@ describe('JobQueue', () => {
             assert.equal((queue as any).handler, handler);
             assert.equal((queue as any).imq.listenerCount('message'), 1);
         });
+    });
 
-        // todo: add more coverage
+    // The 'message' listener, reached directly rather than through emit(). It is
+    // an async function, so as an event handler a rejection would escape as an
+    // unhandled rejection — invisible to assert.rejects and liable to take the
+    // whole process down. Calling it gives us the promise to assert on.
+    describe("the 'message' listener", () => {
+        const sandbox = createSandbox();
+        let queue: JobQueue<any>;
+
+        const deliver = (message: any): Promise<void> =>
+            (queue as any).imq.listeners('message')[0](message);
+
+        beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
+        afterEach(async () => {
+            sandbox.restore();
+            await queue.destroy();
+        });
+
+        // Everything the guard is meant to reject. null and undefined used to
+        // throw from the destructuring on the line after the warning; the
+        // primitives destructured to all-undefined and reached the handler as
+        // though `undefined` were a real job.
+        for (const [label, message] of [
+            ['null', null],
+            ['undefined', undefined],
+            ['a string', 'not a job'],
+            ['a number', 42],
+            ['a boolean', true],
+        ] as [string, any][]) {
+            it(`should warn and skip ${label}`, async () => {
+                const handler = sandbox.spy();
+                const warn = sandbox.spy(logger, 'warn');
+                const send = sandbox.spy((queue as any).imq, 'send');
+
+                queue.onPop(handler as any);
+
+                await assert.doesNotReject(() => deliver(message));
+
+                assert.equal(handler.called, false, 'handler must not run');
+                assert.equal(warn.calledOnce, true, 'must warn once');
+                assert.equal(send.called, false, 'must not re-queue');
+            });
+        }
+
+        it('should hand a valid message to the handler', async () => {
+            const handler = sandbox.spy();
+            const warn = sandbox.spy(logger, 'warn');
+
+            queue.onPop(handler as any);
+            await deliver({ job: { id: 1 } });
+
+            assert.equal(handler.calledOnce, true);
+            assert.deepEqual(handler.args[0][0], { id: 1 });
+            assert.equal(warn.called, false);
+        });
+
+        it('should re-schedule with the delay the handler returns', async () => {
+            const send = sandbox.spy((queue as any).imq, 'send');
+            const message = { job: 'x' };
+
+            queue.onPop(() => 1000);
+            await deliver(message);
+
+            assert.equal(send.calledOnce, true);
+            assert.deepEqual(send.args[0], ['Test', message, 1000]);
+        });
+
+        it('should re-schedule with the original delay when the handler throws', async () => {
+            const send = sandbox.spy((queue as any).imq, 'send');
+            const message = { job: 'x', delay: 250 };
+
+            queue.onPop(() => {
+                throw new Error('Job error');
+            });
+            await deliver(message);
+
+            assert.equal(send.calledOnce, true);
+            assert.deepEqual(send.args[0], ['Test', message, 250]);
+        });
+
+        it('should not re-schedule a job whose ttl has passed', async () => {
+            const send = sandbox.spy((queue as any).imq, 'send');
+            const handler = sandbox.spy();
+
+            queue.onPop(handler as any);
+            // expire is consulted only AFTER the handler runs, so an expired job
+            // still runs once and only loses its re-scheduling
+            await deliver({ job: 'x', expire: Date.now() - 1, delay: 10 });
+
+            assert.equal(handler.calledOnce, true);
+            assert.equal(send.called, false);
+        });
     });
 });

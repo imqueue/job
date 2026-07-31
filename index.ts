@@ -632,6 +632,11 @@ export class JobQueueWorker<T>
      * {@link BaseJobQueue.start} has been called, so registering the handler first
      * and starting second is the order that cannot drop a job.
      *
+     * A message that is not an object — `null`, `undefined` or a bare primitive,
+     * none of which this package produces — is logged as invalid and dropped
+     * without reaching the handler, so the handler can assume it is being given a
+     * job rather than having to guard for one.
+     *
      * See {@link JobQueuePopHandler} for what the handler's return value does,
      * which is where this queue's retry behaviour is decided.
      */
@@ -641,9 +646,11 @@ export class JobQueueWorker<T>
         this.imq.on('message', async (message: any) => {
             if (typeof message !== 'object' || !message) {
                 this.logger.warn(
-                    '[JobQueue] Invalid message received:',
+                    '[JobQueue] Invalid message received, skipping:',
                     JSON.stringify(message),
                 );
+
+                return;
             }
 
             const { job, expire, delay } = message;
