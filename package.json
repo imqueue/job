@@ -1,6 +1,6 @@
 {
   "name": "@imqueue/job",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "description": "Simple job queue",
   "keywords": [
     "message-queue",
