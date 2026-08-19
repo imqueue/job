@@ -81,6 +81,138 @@ import IMQ, {
 } from '@imqueue/core';
 
 /**
+ * Redis error replies this helper is allowed to quote. The leading token of a
+ * Redis error reply is a protocol constant, never data — but only these are
+ * recognised, so an arbitrary upper-case first word of some other error's
+ * message can never reach the log.
+ */
+const REDIS_REPLY_CODES: Set<string> = new Set([
+    'ASK',
+    'BUSY',
+    'BUSYGROUP',
+    'CLUSTERDOWN',
+    'CROSSSLOT',
+    'ERR',
+    'EXECABORT',
+    'LOADING',
+    'MASTERDOWN',
+    'MISCONF',
+    'MOVED',
+    'NOAUTH',
+    'NOGROUP',
+    'NOPERM',
+    'NOPROTO',
+    'NOREPLICAS',
+    'NOSCRIPT',
+    'NOTBUSY',
+    'OOM',
+    'READONLY',
+    'TRYAGAIN',
+    'UNBLOCKED',
+    'UNKILLABLE',
+    'WRONGPASS',
+    'WRONGTYPE',
+]);
+
+/**
+ * Transport failures the redis client reports by message only, mapped to a
+ * code of our own. The patterns are fixed library strings, so nothing from an
+ * application error can match them.
+ */
+const CLIENT_MESSAGE_CODES: Array<[RegExp, string]> = [
+    [/^Connection is closed/i, 'CONNECTION_CLOSED'],
+    [/^Stream connection ended/i, 'STREAM_ENDED'],
+    [/^Reached the max retries per request limit/i, 'MAX_RETRIES'],
+    [/^Command timed out/i, 'COMMAND_TIMEOUT'],
+];
+
+/**
+ * Shape of an `err.code` this helper accepts: an `IMQ_`-prefixed code of the
+ * framework itself, or a system errno such as `ECONNREFUSED`.
+ */
+const SAFE_CODE = /^(IMQ_[A-Z0-9_]{1,48}|E[A-Z]{2,15})$/;
+
+/** Upper bound of a numeric `err.code`, so that no long number can pass */
+const MAX_NUMERIC_CODE = 65535;
+
+/**
+ * Writes one line through the given logger, containing a throwing logger so
+ * that logging can never influence queue behaviour. Every added line of this
+ * package goes through here and is written on every occurrence.
+ *
+ * @param logger - logger to write the line with
+ * @param level - logger method to use
+ * @param message - the line, which must never carry the job body
+ */
+function logSafe(
+    logger: ILogger,
+    level: 'info' | 'warn' | 'error',
+    message: string,
+): void {
+    try {
+        logger[level](message);
+    } catch {
+        // a failing logger must never influence queue behaviour
+    }
+}
+
+/**
+ * Extracts a loggable failure code from an unknown thrown value.
+ *
+ * @param err - the caught value, of any shape
+ * @returns the code, or `unknown` when none can be told safely
+ *
+ * @remarks
+ * Deliberately conservative: only an allow-listed code can come out of here,
+ * because an application error reaches this helper too and anything of its own
+ * may carry personal data. Recognised are a framework or system `code`, a
+ * small numeric `code`, the leading token of a known Redis error reply and a
+ * known redis-client failure message. Everything else — including the error's
+ * message, its stack and its class name — yields `unknown`. Never throws.
+ */
+function errorCode(err: unknown): string {
+    try {
+        const code = (err as { code?: unknown } | undefined)?.code;
+
+        if (
+            typeof code === 'number' &&
+            Number.isInteger(code) &&
+            code >= 0 &&
+            code <= MAX_NUMERIC_CODE
+        ) {
+            return String(code);
+        }
+
+        if (
+            typeof code === 'string' &&
+            (SAFE_CODE.test(code) || REDIS_REPLY_CODES.has(code))
+        ) {
+            return code;
+        }
+
+        const message = (err as { message?: unknown } | undefined)?.message;
+
+        if (typeof message === 'string') {
+            const reply = message.split(' ', 1)[0];
+
+            if (REDIS_REPLY_CODES.has(reply)) {
+                return reply;
+            }
+
+            for (const [pattern, mapped] of CLIENT_MESSAGE_CODES) {
+                if (pattern.test(message)) {
+                    return mapped;
+                }
+            }
+        }
+
+        return 'unknown';
+    } catch {
+        return 'unknown';
+    }
+}
+
+/**
  * Everything a job queue needs to connect and behave, given to every constructor
  * in this package.
  *
@@ -549,8 +681,13 @@ export class JobQueuePublisher<T>
      * @remarks
      * Fire-and-forget, and worth being deliberate about: this returns
      * synchronously without waiting for the broker to accept the job, and a failed
-     * enqueue is reported only by logging `[JobQueue] push error:` through
-     * {@link JobQueueOptions.logger}. It neither throws nor hands back anything to
+     * enqueue is reported only by logging `[JobQueue] push error:` at `error`
+     * level through {@link JobQueueOptions.logger} — with the queue name, the
+     * requested delay and ttl and the failure code, but never the job body. Both
+     * causes are covered: the enqueue not starting at all, and the write to
+     * redis being rejected afterwards, and one failed push writes one such
+     * line (the underlying transport may add its own write-failure
+     * diagnostic). It neither throws nor hands back anything to
      * await, so a caller that must know the job was really enqueued cannot learn it
      * from here — watch the log, or check for the job's effects.
      *
@@ -559,6 +696,36 @@ export class JobQueuePublisher<T>
      */
     public push(job: T, options?: PushOptions): JobQueuePublisher<T> {
         options = options || ({} as PushOptions);
+
+        const { delay, ttl } = options;
+        // both causes of a lost job go through one formatter, so a single
+        // failure never writes two lines: the send itself rejecting (the
+        // queue could not be started) and the write to redis being rejected
+        // later, which core may deliver through both the command callback
+        // and the returned promise. It must never throw - core calls it
+        // without a guard of its own - and it never logs the job body
+        let reported = false;
+        const report = (err: unknown): void => {
+            try {
+                if (reported) {
+                    return;
+                }
+
+                reported = true;
+
+                const code = errorCode(err);
+
+                logSafe(
+                    this.logger,
+                    'error',
+                    `[JobQueue] push error: queue ${this.name}, delay ${
+                        delay === undefined ? 'none' : delay
+                    }, ttl ${ttl === undefined ? 'none' : ttl}, code ${code}`,
+                );
+            } catch {
+                // logging must never influence the queue
+            }
+        };
 
         this.imq
             .send(
@@ -571,8 +738,9 @@ export class JobQueuePublisher<T>
                     ...(options.delay ? { delay: options.delay } : {}),
                 },
                 options.delay,
+                report,
             )
-            .catch(err => this.logger.log('[JobQueue] push error:', err));
+            .catch(report);
 
         return this;
     }
@@ -643,7 +811,7 @@ export class JobQueueWorker<T>
     public onPop(handler: JobQueuePopHandler<T>): JobQueueWorker<T> {
         this.handler = handler;
         this.imq.removeAllListeners('message');
-        this.imq.on('message', async (message: any) => {
+        this.imq.on('message', async (message: any, id?: string) => {
             if (typeof message !== 'object' || !message) {
                 this.logger.warn(
                     '[JobQueue] Invalid message received, skipping:',
@@ -655,6 +823,8 @@ export class JobQueueWorker<T>
 
             const { job, expire, delay } = message;
             let rescheduleDelay: number | void | undefined | Promise<any>;
+            let handlerError: unknown;
+            let failed = false;
 
             try {
                 rescheduleDelay = this.handler?.(job);
@@ -670,15 +840,95 @@ export class JobQueueWorker<T>
                 }
             } catch (err) {
                 rescheduleDelay = delay;
-                this.logger.log('[JobQueue] Error handling job:', err);
+                handlerError = err;
+                failed = true;
             }
 
-            if (typeof expire === 'number' && expire <= Date.now()) {
+            const expired = typeof expire === 'number' && expire <= Date.now();
+            const retrying =
+                typeof rescheduleDelay === 'number' && rescheduleDelay >= 0;
+
+            // the line is written once the outcome is known, so that it says
+            // what happens next instead of leaving the reader guessing; the
+            // handler's error object is never logged - it may quote the job
+            if (failed) {
+                const code = errorCode(handlerError);
+
+                // this line existed on every failure before, and each
+                // occurrence carries its own message id and its own retry
+                // decision
+                logSafe(
+                    this.logger,
+                    'error',
+                    `[JobQueue] Error handling job: queue ${this.name}, ` +
+                        `message ${id || 'unknown'}, code ${code}, ${
+                            expired || !retrying
+                                ? 'no retry'
+                                : `retry in ${rescheduleDelay} ms`
+                        }`,
+                );
+            }
+
+            if (expired) {
+                // only when a retry was actually asked for: on a plain
+                // successful handler this branch is the normal end of a job
+                if (retrying) {
+                    // one line per expired job: each carries its own message
+                    // id, and the flow is bounded by the expired backlog
+                    logSafe(
+                        this.logger,
+                        'info',
+                        `[JobQueue] retry suppressed, ttl expired: queue ${
+                            this.name
+                        }, message ${id || 'unknown'}`,
+                    );
+                }
+
                 return; // remove job from queue
             }
 
-            if (typeof rescheduleDelay === 'number' && rescheduleDelay >= 0) {
-                await this.imq.send(this.name, message, rescheduleDelay);
+            if (retrying) {
+                // both causes of a failed re-schedule go through one line:
+                // the send rejecting, and the write to redis being rejected
+                // afterwards, which core may deliver through both the command
+                // callback and the returned promise - hence the once-guard.
+                // The value keeps escaping the handler exactly as it does
+                // today - it is logged, not swallowed
+                let reported = false;
+                const report = (err: unknown): void => {
+                    try {
+                        if (reported) {
+                            return;
+                        }
+
+                        reported = true;
+
+                        const code = errorCode(err);
+
+                        logSafe(
+                            this.logger,
+                            'error',
+                            `[JobQueue] Job re-schedule failed: queue ${
+                                this.name
+                            }, message ${id || 'unknown'}, code ${code}`,
+                        );
+                    } catch {
+                        // logging must never influence the queue
+                    }
+                };
+
+                try {
+                    await this.imq.send(
+                        this.name,
+                        message,
+                        rescheduleDelay as number,
+                        report,
+                    );
+                } catch (err) {
+                    report(err);
+
+                    throw err;
+                }
             }
         });
 
