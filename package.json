@@ -39,7 +39,7 @@
   "author": "imqueue.com <support@imqueue.com> (https://imqueue.com)",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "@imqueue/core": "^3.2.2"
+    "@imqueue/core": "^3.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",
