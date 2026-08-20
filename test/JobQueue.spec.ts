@@ -28,6 +28,22 @@ import './mocks/index.js';
 import { logger } from './mocks/index.js';
 import JobQueue from '../index.js';
 
+/** A logger of its own per test, so no other queue's line can be counted */
+const capturing = (): any => {
+    const captured: any = { info: [], warn: [], error: [] };
+    const join = (args: any[]): string =>
+        args.map(arg => String(arg)).join(' ');
+
+    captured.logger = {
+        log: () => undefined,
+        info: (...args: any[]) => captured.info.push(join(args)),
+        warn: (...args: any[]) => captured.warn.push(join(args)),
+        error: (...args: any[]) => captured.error.push(join(args)),
+    };
+
+    return captured;
+};
+
 describe('JobQueue', () => {
     it('should be a class', () => {
         assert.equal(typeof JobQueue, 'function');
@@ -217,6 +233,113 @@ describe('JobQueue', () => {
 
             spy.restore();
         });
+
+        it('should report a rejected enqueue with its scheduling', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+            const send = makeSpy((own as any).imq, 'send').rejects(
+                new Error('WRONGTYPE customer 000-00-0000'),
+            );
+
+            (own as any).handler = () => {};
+            await own.push({ ssn: '000-00-0000' }, { ttl: 100, delay: 10 });
+            await new Promise(resolve => setImmediate(resolve));
+
+            assert.equal(cap.error.length, 1);
+            assert.match(cap.error[0], /\[JobQueue\] push error/);
+            assert.match(cap.error[0], /queue Own/);
+            assert.match(cap.error[0], /delay 10/);
+            assert.match(cap.error[0], /ttl 100/);
+            assert.match(cap.error[0], /code WRONGTYPE/);
+            assert.equal(cap.error[0].includes('000-00-0000'), false);
+
+            send.restore();
+            await own.destroy();
+        });
+
+        it('should write one line when core delivers one failure twice', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+            const send = makeSpy((own as any).imq, 'send');
+
+            (own as any).handler = () => {};
+            await own.push('x');
+
+            const report = send.args[0][3];
+
+            assert.equal(
+                typeof report,
+                'function',
+                'core must be given an error handler for the write',
+            );
+            assert.doesNotThrow(() => report(new Error('OOM nope')));
+            assert.doesNotThrow(() => report(new Error('OOM nope')));
+
+            const matched = cap.error.filter((one: string) =>
+                /\[JobQueue\] push error/.test(one),
+            );
+
+            assert.equal(
+                matched.length,
+                1,
+                'a doubly-delivered failure must write one line',
+            );
+            assert.match(matched[0], /delay none/);
+            assert.match(matched[0], /ttl none/);
+            assert.match(matched[0], /code OOM/);
+
+            send.restore();
+            await own.destroy();
+        });
+
+        it('should report every failed push separately', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+            const send = makeSpy((own as any).imq, 'send');
+
+            (own as any).handler = () => {};
+            await own.push('x');
+            await own.push('y', { delay: 500 });
+
+            (send.args[0][3] as any)(new Error('OOM nope'));
+            (send.args[1][3] as any)(new Error('OOM nope'));
+
+            const matched = cap.error.filter((one: string) =>
+                /\[JobQueue\] push error/.test(one),
+            );
+
+            // one line per failed push: no aggregation across pushes
+            assert.equal(matched.length, 2);
+            assert.match(matched[0], /delay none/);
+            assert.match(matched[1], /delay 500/);
+
+            send.restore();
+            await own.destroy();
+        });
+
+        it('should survive a broken logger while reporting', async () => {
+            const broken: any = {
+                log: () => {},
+                info: () => {},
+                warn: () => {},
+                error: () => {
+                    throw new Error('logger is broken');
+                },
+            };
+            const brokenQueue = new JobQueue<any>({
+                name: 'Broken',
+                logger: broken,
+            });
+            const send = makeSpy((brokenQueue as any).imq, 'send');
+
+            (brokenQueue as any).handler = () => {};
+            await brokenQueue.push('x');
+
+            assert.doesNotThrow(() => send.args[0][3](new Error('boom')));
+
+            send.restore();
+            await brokenQueue.destroy();
+        });
     });
 
     describe('onPop', () => {
@@ -246,6 +369,8 @@ describe('JobQueue', () => {
 
         const deliver = (message: any): Promise<void> =>
             (queue as any).imq.listeners('message')[0](message);
+        const deliver2 = (message: any, id: string): Promise<void> =>
+            (queue as any).imq.listeners('message')[0](message, id);
 
         beforeEach(() => (queue = new JobQueue<any>({ name: 'Test', logger })));
         afterEach(async () => {
@@ -299,7 +424,12 @@ describe('JobQueue', () => {
             await deliver(message);
 
             assert.equal(send.calledOnce, true);
-            assert.deepEqual(send.args[0], ['Test', message, 1000]);
+            assert.deepEqual(send.args[0].slice(0, 3), ['Test', message, 1000]);
+            assert.equal(
+                typeof send.args[0][3],
+                'function',
+                'a late write failure must be reported through core',
+            );
         });
 
         it('should re-schedule with the original delay when the handler throws', async () => {
@@ -312,7 +442,243 @@ describe('JobQueue', () => {
             await deliver(message);
 
             assert.equal(send.calledOnce, true);
-            assert.deepEqual(send.args[0], ['Test', message, 250]);
+            assert.deepEqual(send.args[0].slice(0, 3), ['Test', message, 250]);
+            assert.equal(typeof send.args[0][3], 'function');
+        });
+
+        it('should report a failed handler with what happens next', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+            const to = (message: any, id: string): Promise<void> =>
+                (own as any).imq.listeners('message')[0](message, id);
+
+            own.onPop(() => {
+                throw new Error('WRONGTYPE customer 000-00-0000');
+            });
+            await to({ job: { ssn: '000-00-0000' }, delay: 250 }, 'msg-42');
+
+            assert.equal(cap.error.length, 1);
+            assert.match(cap.error[0], /Error handling job/);
+            assert.match(cap.error[0], /queue Own/);
+            assert.match(cap.error[0], /message msg-42/);
+            assert.match(cap.error[0], /code WRONGTYPE/);
+            assert.match(cap.error[0], /retry in 250 ms/);
+            assert.equal(cap.error[0].includes('000-00-0000'), false);
+
+            await own.destroy();
+        });
+
+        it('should report every failure of a row, ids and decisions apart', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+            const to = (message: any, id: string): Promise<void> =>
+                (own as any).imq.listeners('message')[0](message, id);
+
+            own.onPop(() => {
+                throw new Error('WRONGTYPE nope');
+            });
+            // same failure code twice within one minute, different messages
+            // and different retry decisions: both lines must be written -
+            // on master every handler failure wrote a line, and keeping
+            // that is what tells the two messages apart
+            await to({ job: 'a' }, 'msg-50');
+            await to({ job: 'b', delay: 100 }, 'msg-51');
+
+            assert.equal(cap.error.length, 2);
+            assert.match(cap.error[0], /message msg-50/);
+            assert.match(cap.error[0], /no retry/);
+            assert.match(cap.error[1], /message msg-51/);
+            assert.match(cap.error[1], /retry in 100 ms/);
+
+            await own.destroy();
+        });
+
+        it('should say a failed handler gets no retry when none is due', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+
+            own.onPop(() => {
+                throw new Error('Job error');
+            });
+            await (own as any).imq.listeners('message')[0](
+                { job: 'x' },
+                'msg-43',
+            );
+
+            assert.equal(cap.error.length, 1);
+            assert.match(cap.error[0], /no retry/);
+
+            await own.destroy();
+        });
+
+        it('should report every retry suppressed by an expired ttl', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+
+            own.onPop(() => 1000);
+            await (own as any).imq.listeners('message')[0](
+                { job: 'x', expire: Date.now() - 1 },
+                'msg-44',
+            );
+            await (own as any).imq.listeners('message')[0](
+                { job: 'y', expire: Date.now() - 1 },
+                'msg-45',
+            );
+
+            // one line per expired job, each with its own message id
+            assert.equal(cap.info.length, 2);
+            assert.match(cap.info[0], /retry suppressed, ttl expired/);
+            assert.match(cap.info[0], /queue Own/);
+            assert.match(cap.info[0], /message msg-44/);
+            assert.match(cap.info[1], /message msg-45/);
+
+            await own.destroy();
+        });
+
+        it('should stay quiet when an expired job asked for no retry', async () => {
+            const cap = capturing();
+            const own = new JobQueue<any>({ name: 'Own', logger: cap.logger });
+
+            own.onPop(() => undefined);
+            await (own as any).imq.listeners('message')[0](
+                { job: 'x', expire: Date.now() - 1 },
+                'msg-45',
+            );
+
+            assert.equal(cap.info.length, 0);
+            assert.equal(cap.error.length, 0);
+
+            await own.destroy();
+        });
+
+        it('should report a failed re-schedule and still let it escape', async () => {
+            const error = sandbox.spy(logger, 'error');
+            const failure = new Error('WRONGTYPE nope');
+
+            sandbox.spy((queue as any).imq, 'send').rejects(failure);
+            queue.onPop(() => 1000);
+
+            await assert.rejects(
+                () => deliver2({ job: 'x' }, 'msg-46'),
+                (err: any) => err === failure,
+            );
+
+            const line = String(error.args[0]?.[0]);
+
+            assert.match(line, /Job re-schedule failed/);
+            assert.match(line, /message msg-46/);
+            assert.match(line, /code WRONGTYPE/);
+        });
+
+        it('should write one line when one re-schedule failure comes twice', async () => {
+            const error = sandbox.spy(logger, 'error');
+            const send = sandbox.spy((queue as any).imq, 'send');
+
+            queue.onPop(() => 1000);
+            await deliver2({ job: 'x' }, 'msg-47');
+
+            const report = send.args[0][3];
+
+            assert.equal(typeof report, 'function');
+            assert.doesNotThrow(() => report(new Error('OOM nope')));
+            assert.doesNotThrow(() => report(new Error('OOM nope')));
+
+            const lines = error.args.map((one: any[]) => String(one[0]));
+            const matched = lines.filter((one: string) =>
+                /Job re-schedule failed/.test(one),
+            );
+
+            assert.equal(
+                matched.length,
+                1,
+                'a doubly-delivered failure must write one line',
+            );
+            assert.match(matched[0], /code OOM/);
+        });
+
+        it('should report every failed re-schedule separately', async () => {
+            const error = sandbox.spy(logger, 'error');
+            const send = sandbox.spy((queue as any).imq, 'send');
+
+            queue.onPop(() => 1000);
+            await deliver2({ job: 'x' }, 'msg-48');
+            await deliver2({ job: 'y' }, 'msg-49');
+
+            (send.args[0][3] as any)(new Error('OOM nope'));
+            (send.args[1][3] as any)(new Error('OOM nope'));
+
+            const lines = error.args.map((one: any[]) => String(one[0]));
+            const matched = lines.filter((one: string) =>
+                /Job re-schedule failed/.test(one),
+            );
+
+            // one line per failed re-schedule, each with its own message id
+            assert.equal(matched.length, 2);
+            assert.match(matched[0], /message msg-48/);
+            assert.match(matched[1], /message msg-49/);
+        });
+
+        it('should keep every re-scheduling decision it made before', async () => {
+            const send = sandbox.spy((queue as any).imq, 'send');
+
+            // a zero delay is a re-schedule, not a falsy skip
+            queue.onPop(() => 0);
+            await deliver2({ job: 'a' }, 'm1');
+
+            // a resolved promise is awaited and used
+            queue.onPop(() => Promise.resolve(700));
+            await deliver2({ job: 'b' }, 'm2');
+
+            // a rejected promise falls back to the message's own delay
+            queue.onPop(() => Promise.reject(new Error('boom')));
+            await deliver2({ job: 'c', delay: 250 }, 'm3');
+
+            // anything not a number is not a re-schedule
+            queue.onPop(() => 'soon' as any);
+            await deliver2({ job: 'd' }, 'm4');
+
+            // a non-numeric ttl never suppresses anything
+            queue.onPop(() => 900);
+            await deliver2({ job: 'e', expire: 'yesterday' }, 'm5');
+
+            assert.deepEqual(
+                send.args.map((one: any[]) => one[2]),
+                [0, 700, 250, 900],
+            );
+        });
+
+        it('should not let a broken logger cancel a re-schedule', async () => {
+            // named difference from the previous release: the line is written
+            // through a contained writer, so a logger which throws no longer
+            // takes the re-scheduling down with it
+            const broken: any = {
+                log: () => {},
+                info: () => {},
+                warn: () => {},
+                error: () => {
+                    throw new Error('logger is broken');
+                },
+            };
+            const brokenQueue = new JobQueue<any>({
+                name: 'Broken',
+                logger: broken,
+            });
+            const send = makeSpy((brokenQueue as any).imq, 'send');
+
+            brokenQueue.onPop(() => {
+                throw new Error('Job error');
+            });
+
+            await (brokenQueue as any).imq.listeners('message')[0](
+                { job: 'x', delay: 100 },
+                'm6',
+            );
+
+            assert.equal(send.calledOnce, true);
+            assert.equal(send.args[0][2], 100);
+
+            send.restore();
+            await brokenQueue.destroy();
         });
 
         it('should not re-schedule a job whose ttl has passed', async () => {
