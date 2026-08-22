@@ -1,11 +1,16 @@
 # Simple Job Queue (@imqueue/job)
 
-[![Build Status](https://img.shields.io/github/actions/workflow/status/imqueue/job/build.yml)](https://github.com/imqueue/job)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/imqueue/job/build.yml)](https://github.com/imqueue/job/actions/workflows/build.yml)
+[![npm version](https://img.shields.io/npm/v/@imqueue/job)](https://www.npmjs.com/package/@imqueue/job)
 [![Known Vulnerabilities](https://snyk.io/test/github/imqueue/job/badge.svg?targetFile=package.json)](https://snyk.io/test/github/imqueue/job?targetFile=package.json)
-[![License](https://img.shields.io/badge/license-GPL-blue.svg)](https://rawgit.com/imqueue/core/master/LICENSE)
+[![License](https://img.shields.io/badge/license-GPL-blue.svg)](https://github.com/imqueue/job/blob/master/LICENSE)
 
 Simple job queue using JSON messaging for managing backand background jobs.
 Backed up by Redis.
+
+**Using an AI assistant?** Point it at [imqueue.org/llms.txt](https://imqueue.org/llms.txt)
+for a machine-readable index of the docs. Current version, licence and Node floor
+for every package: [imqueue.org/status.json](https://imqueue.org/status.json).
 
 # Features
 
