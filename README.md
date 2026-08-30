@@ -71,6 +71,54 @@ new JobQueueWorker<string>({ name: 'CustomTestJob' })
     .catch(err => console.error(err));
 ~~~
 
+# Graceful shutdown
+
+By default a worker signalled mid-job abandons it: `@imqueue/core`'s signal
+handlers release the watcher locks and exit without waiting for `onPop` to
+return. Safe delivery does not save it — the job's worker key is released the
+moment the job reaches the handler, so nothing re-queues it.
+
+Opt into draining and `SIGTERM`/`SIGINT` instead stop popping, wait for the
+handlers already running, put back whatever the budget ran out on, and exit `0`:
+
+~~~bash
+IMQ_DRAIN_ENABLE=1
+~~~
+
+| variable | option | default | meaning |
+|---|---|---|---|
+| `IMQ_DRAIN_ENABLE` | `drain` | `0` | drain on `SIGTERM`/`SIGINT` |
+| `IMQ_DRAIN_TIMEOUT` | `drainTimeout` | `4000` | drain budget, milliseconds |
+| `IMQ_DRAIN_REQUEUE` | `drainRequeue` | `1` | push abandoned jobs back |
+
+~~~typescript
+new JobQueueWorker<string>({
+    name: 'CustomTestJob',
+    drain: true,
+    drainTimeout: 20000,
+})
+    .onPop(job => console.log(job))
+    .start()
+    .catch(err => console.error(err));
+~~~
+
+The drain waits for the whole of a job's handling, not just the handler — a
+handler that asks to be retried re-schedules itself over the writer connection,
+and that send has to complete too.
+
+**Raise `drainTimeout` for real workloads.** The 4000 ms default is sized for
+the `imq stop` CLI, which polls for about five seconds before `SIGKILL`; it is
+not sized for your handlers. Kubernetes allows 30 s by default.
+
+**`drainRequeue` trades a lost attempt for a possible duplicate.** A job the
+drain gives up on is pushed back while its handler is still running, so it can
+both complete and be delivered again — the same duplicate a lease expiry would
+produce. Turn it off if a duplicate is worse than a lost attempt.
+
+Delivery remains **at-least-once** in every mode. A drain narrows the window in
+which an attempt is lost; `SIGKILL`, an OOM kill or a lost node still take it,
+so handlers must stay idempotent.
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0.

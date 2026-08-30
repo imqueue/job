@@ -44,12 +44,17 @@
  * class instances, `Date`, `undefined` properties, cycles — does not arrive as it
  * left. Push a plain object and re-hydrate it in the handler.
  *
- * Shutdown is worth knowing about before it matters in production. `@imqueue/core`
- * installs process-wide SIGTERM, SIGINT and SIGABRT handlers by default; they
+ * Shutdown is worth knowing about before it matters in production. By default
+ * `@imqueue/core` installs process-wide SIGTERM, SIGINT and SIGABRT handlers; they
  * release the queue's watcher locks and then exit the process without waiting for
  * a running handler to return. So a job in flight when the signal arrives loses
  * that attempt, and is re-delivered later only if safe delivery had the job checked
- * out. Drain work yourself if a half-finished job would do damage.
+ * out — which it does not once the job has reached the handler.
+ *
+ * Set `IMQ_DRAIN_ENABLE=1`, or {@link JobQueueOptions.drain}, and SIGTERM/SIGINT
+ * instead stop popping, wait for the handlers already running, put back anything
+ * the budget ran out on, and exit `0`. It is off by default, so nothing about an
+ * existing worker changes until you turn it on.
  *
  * @example
  * ```typescript
@@ -213,6 +218,214 @@ function errorCode(err: unknown): string {
 }
 
 /**
+ * Default drain budget in milliseconds, used when neither
+ * {@link JobQueueOptions.drainTimeout} nor `IMQ_DRAIN_TIMEOUT` is set.
+ *
+ * @remarks
+ * Sized against the `imq stop` CLI rather than a cluster: it signals the process
+ * group, polls liveness for about five seconds, then sends `SIGKILL`. A budget
+ * above that would let the local CLI kill a draining worker harder than
+ * Kubernetes would, whose `terminationGracePeriodSeconds` defaults to 30 s. 4000
+ * leaves roughly a second for the re-queue, `destroy()` and process teardown.
+ *
+ * Job handlers are often longer-running than RPC calls, so this is the number
+ * most worth raising — see {@link JobQueueOptions.drainTimeout}.
+ */
+export const DEFAULT_IMQ_DRAIN_TIMEOUT = 4000;
+
+/**
+ * Signals that start a drain when draining is enabled.
+ */
+const DRAIN_SIGNALS: readonly string[] = ['SIGTERM', 'SIGINT'];
+
+/**
+ * One unit of work a drain waits for.
+ */
+interface InFlight {
+    /**
+     * Settles when the work settles, and never rejects — so a drain can await
+     * it without consuming a rejection that belongs to somebody else.
+     */
+    settled: Promise<void>;
+    /**
+     * The popped message, present only for job handling. This is what a drain
+     * puts back on the queue when it runs out of budget; a pending `push()` has
+     * no message to put back, so it carries none.
+     */
+    message?: any;
+}
+
+/**
+ * Every drain-enabled queue in this process.
+ *
+ * @remarks
+ * Process-wide rather than per-queue on purpose. A worker and a publisher in one
+ * process are two queues with two drains, and if each installed its own signal
+ * handler the first one to finish would `process.exit()` out from under the
+ * other. One handler drains them all and exits once.
+ */
+const drainables = new Set<BaseJobQueue<any, any>>();
+
+/**
+ * The process signal handlers this package installed, kept by exact reference so
+ * they can be taken back off when the last drainable queue is destroyed.
+ */
+const drainHandlers: Array<[string, () => void]> = [];
+
+/**
+ * Set once a drain has begun, so a second signal is recognisable as one.
+ */
+let draining = false;
+
+/**
+ * No-op used to derive a never-rejecting promise from tracked work.
+ */
+function ignore(): void {
+    /* deliberately empty */
+}
+
+/**
+ * Reads a boolean `IMQ_*` environment variable.
+ *
+ * @param name - environment variable name
+ * @param defaultValue - value used when the variable is unset or empty
+ * @returns the parsed flag
+ * @throws TypeError when the variable is set to something non-numeric
+ *
+ * @remarks
+ * Numeric coercion is the convention across the `IMQ_*` family, which reads its
+ * booleans as `!!+(process.env.X || 0)`. Under that convention a well-meant
+ * `IMQ_DRAIN_ENABLE=true` coerces to `NaN` and reads as *disabled* — a feature
+ * quietly doing nothing. So a non-numeric value throws instead.
+ */
+function envFlag(name: string, defaultValue: boolean): boolean {
+    const raw = process.env[name];
+
+    if (raw === undefined || raw === '') {
+        return defaultValue;
+    }
+
+    const value = Number(raw);
+
+    if (!Number.isFinite(value)) {
+        throw new TypeError(
+            `${name} must be 0 or 1, got ${JSON.stringify(raw)}. ` +
+                'Boolean IMQ_* variables are read numerically.',
+        );
+    }
+
+    return !!value;
+}
+
+/**
+ * Reads a millisecond-valued `IMQ_*` environment variable.
+ *
+ * @param name - environment variable name
+ * @param defaultValue - value used when the variable is unset or empty
+ * @returns the parsed duration in milliseconds
+ * @throws TypeError when the variable is not a finite number above zero
+ */
+function envMs(name: string, defaultValue: number): number {
+    const raw = process.env[name];
+
+    if (raw === undefined || raw === '') {
+        return defaultValue;
+    }
+
+    const value = Number(raw);
+
+    if (!Number.isFinite(value) || value <= 0) {
+        throw new TypeError(
+            `${name} must be a positive number of milliseconds, ` +
+                `got ${JSON.stringify(raw)}.`,
+        );
+    }
+
+    return value;
+}
+
+/**
+ * Whether the given options turn draining on, consulting `IMQ_DRAIN_ENABLE`
+ * when they say nothing.
+ *
+ * @param options - the queue's options
+ * @returns whether this queue drains
+ */
+function drainEnabled(options: JobQueueOptions): boolean {
+    return options.drain ?? envFlag('IMQ_DRAIN_ENABLE', false);
+}
+
+/**
+ * Installs the process-wide drain handlers, once.
+ */
+function bindDrainSignals(): void {
+    if (drainHandlers.length) {
+        return;
+    }
+
+    for (const signal of DRAIN_SIGNALS) {
+        const handler = (): void => {
+            runDrain(signal).catch(err => {
+                // a drain that throws must not leave the process hanging with
+                // nothing left to handle the signal
+                console.error('[JobQueue] drain failed:', err);
+                process.exit(1);
+            });
+        };
+
+        drainHandlers.push([signal, handler]);
+        process.on(signal, handler);
+    }
+}
+
+/**
+ * Removes the process-wide drain handlers once nothing is left to drain.
+ */
+function unbindDrainSignals(): void {
+    for (const [signal, handler] of drainHandlers) {
+        process.removeListener(signal, handler);
+    }
+
+    drainHandlers.length = 0;
+}
+
+/**
+ * Drains every drain-enabled queue in this process and exits.
+ *
+ * @param signal - the signal that started the drain
+ *
+ * @remarks
+ * The order is load-bearing and mirrors the one in `@imqueue/rpc`: `stop()`
+ * before the wait and `destroy()` after it, because `stop()` drops the reader
+ * connection only. The writer has to stay up for the whole wait — a handler that
+ * asks to be retried re-schedules itself through it, and the re-queue of
+ * abandoned work goes through it too.
+ *
+ * Bounded, never open-ended: each queue waits at most its own
+ * {@link JobQueueOptions.drainTimeout}, and the process exits `0` either way.
+ * A second signal exits immediately, the usual double-interrupt convention.
+ */
+async function runDrain(signal: string): Promise<void> {
+    if (draining) {
+        console.warn(
+            `[JobQueue] ${signal} received during drain, exiting immediately`,
+        );
+        process.exit(0);
+    }
+
+    draining = true;
+
+    const queues = [...drainables];
+
+    await Promise.all(queues.map(queue => queue.drainStop(signal)));
+    await Promise.all(queues.map(queue => queue.drainWait()));
+    await Promise.all(queues.map(queue => queue.drainRequeue()));
+    await Promise.all(queues.map(queue => queue.drainDestroy()));
+
+    process.exit(0);
+}
+
+/**
  * Everything a job queue needs to connect and behave, given to every constructor
  * in this package.
  *
@@ -281,6 +494,10 @@ export interface JobQueueOptions {
      * part-way through `onPop` loses that attempt. Jobs are delivered
      * at-least-once, so handlers should be idempotent.
      *
+     * {@link JobQueueOptions.drain} is what covers the processing, for an
+     * orderly shutdown at least — it waits for the handler rather than relying
+     * on a lease that has already been released. Neither covers `SIGKILL`.
+     *
      * Note this defaults to `true` here while `@imqueue/core` defaults it to
      * `false` — a job queue is the case where the extra round-trip is worth it.
      */
@@ -301,6 +518,70 @@ export interface JobQueueOptions {
      * `@imqueue/core`'s own default is 5000; this package raises it to 10000.
      */
     safeLockTtl?: number;
+
+    /**
+     * Drain jobs still being handled before shutting down on `SIGTERM`/`SIGINT`,
+     * instead of exiting from under them.
+     *
+     * @defaultValue the `IMQ_DRAIN_ENABLE` environment variable, itself `false`
+     *
+     * @remarks
+     * Opt-in, and nothing about a queue with it off differs from before it
+     * existed. Left off, `@imqueue/core`'s own signal handlers release the
+     * watcher locks and exit without waiting, so a job in flight loses that
+     * attempt.
+     *
+     * Turned on, `SIGTERM` and `SIGINT` instead stop popping, wait up to
+     * {@link JobQueueOptions.drainTimeout} for the handlers already running —
+     * including the re-schedule a handler asked for — then release the
+     * connection and exit `0`. Enabling it also suppresses the queue layer's own
+     * handlers, which would otherwise exit the process mid-drain.
+     *
+     * Every drain-enabled queue in the process drains together under one signal
+     * handler, so a publisher and a worker side by side do not exit from under
+     * each other.
+     *
+     * Delivery stays at-least-once. A drain narrows the window in which an
+     * attempt is lost; it does not close it.
+     */
+    drain?: boolean;
+
+    /**
+     * Milliseconds a drain waits for jobs in flight before giving up on them.
+     * Ignored unless {@link JobQueueOptions.drain} is on.
+     *
+     * @defaultValue the `IMQ_DRAIN_TIMEOUT` environment variable, itself
+     *               {@link DEFAULT_IMQ_DRAIN_TIMEOUT} (4000)
+     *
+     * @remarks
+     * The wait is always bounded and the process always exits. This is the
+     * number to raise for jobs that legitimately take longer than a few seconds
+     * — the 4000 default is sized for the `imq stop` CLI, not for your handlers.
+     * Whatever is still running when it expires is abandoned, and
+     * {@link JobQueueOptions.drainRequeue} decides whether it comes back.
+     */
+    drainTimeout?: number;
+
+    /**
+     * Put jobs the drain gave up on back on the queue before exiting.
+     *
+     * @defaultValue the `IMQ_DRAIN_REQUEUE` environment variable, itself `true`
+     *
+     * @remarks
+     * This closes the hole the drain itself opens. Safe delivery releases a
+     * job's worker key as soon as the job reaches the handler, so a job the
+     * drain abandons at its budget is not checked out to anybody and nothing
+     * re-queues it — it is simply gone. Re-pushing it on the way out makes that
+     * attempt recoverable.
+     *
+     * The cost is the usual at-least-once one, and it is worth stating plainly:
+     * the abandoned handler is still running when its job is pushed back, so the
+     * job can both complete and be delivered again. That is the same duplicate a
+     * lease expiry would produce, and the reason handlers must be idempotent.
+     *
+     * Turn it off if a duplicate is worse than a lost attempt.
+     */
+    drainRequeue?: boolean;
 
     /**
      * Prefix for every key this queue creates in the broker.
@@ -544,6 +825,30 @@ export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
     public readonly logger: ILogger;
 
     /**
+     * Whether this queue drains before shutting down. Resolved once, at
+     * construction, from {@link JobQueueOptions.drain} falling back to
+     * `IMQ_DRAIN_ENABLE`.
+     */
+    protected readonly drains: boolean;
+
+    /**
+     * Work this queue is waiting on, allocated only while {@link
+     * BaseJobQueue.drains} is on — with draining off there is nothing to track
+     * and nothing to allocate.
+     */
+    protected readonly inFlight?: Set<InFlight>;
+
+    /**
+     * Milliseconds a drain waits before abandoning what is left.
+     */
+    protected readonly drainTimeout: number = DEFAULT_IMQ_DRAIN_TIMEOUT;
+
+    /**
+     * Whether abandoned jobs are pushed back on the way out.
+     */
+    protected readonly drainRequeues: boolean = true;
+
+    /**
      * Stores the options and resolves the logger, leaving the broker connection to
      * the subclass.
      *
@@ -559,6 +864,298 @@ export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
         protected options: JobQueueOptions,
     ) {
         this.logger = options.logger || console;
+        this.drains = drainEnabled(options);
+
+        if (this.drains) {
+            this.inFlight = new Set<InFlight>();
+            this.drainTimeout =
+                options.drainTimeout ??
+                envMs('IMQ_DRAIN_TIMEOUT', DEFAULT_IMQ_DRAIN_TIMEOUT);
+            this.drainRequeues =
+                options.drainRequeue ?? envFlag('IMQ_DRAIN_REQUEUE', true);
+
+            drainables.add(this);
+            bindDrainSignals();
+        }
+    }
+
+    /**
+     * Records a unit of work as in flight until it settles.
+     *
+     * @param work - the promise to wait for
+     * @param message - the popped message, for job handling only; a drain that
+     *        runs out of budget puts this back on the queue
+     * @returns `work`, unchanged
+     *
+     * @remarks
+     * Bookkeeping attaches to a *derived* promise, never to `work` itself, so a
+     * rejection stays whoever owns it to handle and this can never become an
+     * unhandled rejection of its own.
+     *
+     * A no-op that allocates nothing when draining is off, which is what keeps
+     * the default path exactly what it was.
+     */
+    protected track<U>(work: Promise<U>, message?: any): Promise<U> {
+        if (!this.inFlight) {
+            return work;
+        }
+
+        const inFlight = this.inFlight;
+        const entry: InFlight = {
+            settled: work.then(ignore, ignore),
+            message,
+        };
+
+        inFlight.add(entry);
+        void entry.settled.then(() => {
+            inFlight.delete(entry);
+        });
+
+        return work;
+    }
+
+    /**
+     * Handles one popped message: runs the handler, then acts on what it asked
+     * for.
+     *
+     * @remarks
+     * Lives here rather than on {@link JobQueueWorker} because {@link JobQueue}
+     * consumes as well, and reaches the worker's `onPop` through
+     * `Function.call` — so the listener it installs has to find this on the
+     * instance it was called with, whichever of the two that is.
+     *
+     * @param message - the popped message envelope
+     * @param id - broker message id, for log lines
+     */
+    protected async handleMessage(message: any, id?: string): Promise<void> {
+        if (typeof message !== 'object' || !message) {
+            this.logger.warn(
+                '[JobQueue] Invalid message received, skipping:',
+                JSON.stringify(message),
+            );
+
+            return;
+        }
+
+        const { job, expire, delay } = message;
+        let rescheduleDelay: number | void | undefined | Promise<any>;
+        let handlerError: unknown;
+        let failed = false;
+
+        try {
+            rescheduleDelay = this.handler?.(job);
+
+            if (
+                rescheduleDelay &&
+                typeof rescheduleDelay === 'object' &&
+                rescheduleDelay &&
+                (rescheduleDelay as any).then
+            ) {
+                // it's promise
+                rescheduleDelay = await rescheduleDelay;
+            }
+        } catch (err) {
+            rescheduleDelay = delay;
+            handlerError = err;
+            failed = true;
+        }
+
+        const expired = typeof expire === 'number' && expire <= Date.now();
+        const retrying =
+            typeof rescheduleDelay === 'number' && rescheduleDelay >= 0;
+
+        // the line is written once the outcome is known, so that it says
+        // what happens next instead of leaving the reader guessing; the
+        // handler's error object is never logged - it may quote the job
+        if (failed) {
+            const code = errorCode(handlerError);
+
+            // this line existed on every failure before, and each
+            // occurrence carries its own message id and its own retry
+            // decision
+            logSafe(
+                this.logger,
+                'error',
+                `[JobQueue] Error handling job: queue ${this.name}, ` +
+                    `message ${id || 'unknown'}, code ${code}, ${
+                        expired || !retrying
+                            ? 'no retry'
+                            : `retry in ${rescheduleDelay} ms`
+                    }`,
+            );
+        }
+
+        if (expired) {
+            // only when a retry was actually asked for: on a plain
+            // successful handler this branch is the normal end of a job
+            if (retrying) {
+                // one line per expired job: each carries its own message
+                // id, and the flow is bounded by the expired backlog
+                logSafe(
+                    this.logger,
+                    'info',
+                    `[JobQueue] retry suppressed, ttl expired: queue ${
+                        this.name
+                    }, message ${id || 'unknown'}`,
+                );
+            }
+
+            return; // remove job from queue
+        }
+
+        if (retrying) {
+            // both causes of a failed re-schedule go through one line:
+            // the send rejecting, and the write to redis being rejected
+            // afterwards, which core may deliver through both the command
+            // callback and the returned promise - hence the once-guard.
+            // The value keeps escaping the handler exactly as it does
+            // today - it is logged, not swallowed
+            let reported = false;
+            const report = (err: unknown): void => {
+                try {
+                    if (reported) {
+                        return;
+                    }
+
+                    reported = true;
+
+                    const code = errorCode(err);
+
+                    logSafe(
+                        this.logger,
+                        'error',
+                        `[JobQueue] Job re-schedule failed: queue ${
+                            this.name
+                        }, message ${id || 'unknown'}, code ${code}`,
+                    );
+                } catch {
+                    // logging must never influence the queue
+                }
+            };
+
+            try {
+                await this.imq.send(
+                    this.name,
+                    message,
+                    rescheduleDelay as number,
+                    report,
+                );
+            } catch (err) {
+                report(err);
+
+                throw err;
+            }
+        }
+    }
+
+    /**
+     * Drain step one: stop consuming. The reader goes, the writer stays — which
+     * is what lets the rest of the drain publish anything at all.
+     *
+     * @param signal - the signal that started the drain, for the log line
+     */
+    public async drainStop(signal: string): Promise<void> {
+        this.logger.info(
+            `[JobQueue] draining on ${signal}: queue ${this.name}, ` +
+                `${this.inFlight?.size ?? 0} in flight, ` +
+                `budget ${this.drainTimeout}ms`,
+        );
+
+        await this.drainStep('stop', () => this.stop().then(ignore));
+    }
+
+    /**
+     * Drain step two: wait for work already in flight, bounded by
+     * {@link JobQueueOptions.drainTimeout}.
+     */
+    public async drainWait(): Promise<void> {
+        const inFlight = this.inFlight;
+
+        if (!inFlight?.size) {
+            return;
+        }
+
+        let timer: NodeJS.Timeout | undefined;
+        const expired = new Promise<void>(resolve => {
+            timer = setTimeout(resolve, this.drainTimeout);
+        });
+        // every tracked promise is derived and never rejects, so this settles
+        // on completion or on the budget running out, never on an error.
+        // Promise.all drains the iterable synchronously, so the deletions the
+        // entries perform as they settle cannot disturb it
+        const settled = Promise.all([...inFlight].map(entry => entry.settled));
+
+        await Promise.race([settled, expired]);
+
+        clearTimeout(timer);
+    }
+
+    /**
+     * Drain step three: put back whatever the budget ran out on.
+     *
+     * @remarks
+     * Only jobs, and only with {@link JobQueueOptions.drainRequeue} on. Safe
+     * delivery released each job's worker key the moment the job reached the
+     * handler, so an abandoned job is checked out to nobody and nothing else
+     * would ever bring it back.
+     *
+     * The abandoned handler is still running as this pushes its job back, so the
+     * job may both finish and be delivered again — the at-least-once duplicate
+     * a lease expiry would have produced anyway.
+     */
+    public async drainRequeue(): Promise<void> {
+        const abandoned = [...(this.inFlight ?? [])];
+
+        if (!abandoned.length) {
+            return;
+        }
+
+        const jobs = this.drainRequeues
+            ? abandoned.filter(entry => entry.message !== undefined)
+            : [];
+
+        this.logger.warn(
+            `[JobQueue] drain budget of ${this.drainTimeout}ms expired: ` +
+                `queue ${this.name}, abandoning ${abandoned.length}, ` +
+                `re-queueing ${jobs.length}`,
+        );
+
+        for (const entry of jobs) {
+            await this.drainStep('re-queue', async () => {
+                await this.imq.send(this.name, entry.message);
+            });
+        }
+    }
+
+    /**
+     * Drain step four: release the transport. Last, because it closes the
+     * connection every step above needed.
+     */
+    public async drainDestroy(): Promise<void> {
+        await this.drainStep('destroy', () => this.destroy());
+    }
+
+    /**
+     * Runs one drain step, logging a failure rather than propagating it — a
+     * broken step must not leave the process half-drained and alive.
+     *
+     * @param name - step name, for the log line
+     * @param step - the step to run
+     */
+    private async drainStep(
+        name: string,
+        step: () => Promise<void>,
+    ): Promise<void> {
+        try {
+            await step();
+        } catch (err) {
+            logSafe(
+                this.logger,
+                'error',
+                `[JobQueue] drain ${name} failed: queue ${this.name}, ` +
+                    `code ${errorCode(err)}`,
+            );
+        }
     }
 
     /**
@@ -595,6 +1192,16 @@ export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
      * resources. Not reversible — construct a new queue to carry on.
      */
     public async destroy() {
+        if (this.drains) {
+            // a destroyed queue is nothing left to drain; the process handlers
+            // go with the last one, so nothing leaks a process-level listener
+            drainables.delete(this);
+
+            if (!drainables.size) {
+                unbindDrainSignals();
+            }
+        }
+
         await this.imq.destroy();
     }
 }
@@ -621,6 +1228,11 @@ function toIMQOptions(
         username: options.username,
         password: options.password,
         cleanup: false,
+        // the queue layer's own SIGTERM/SIGINT/SIGABRT handlers exit the
+        // process without waiting for a handler, which is exactly what a drain
+        // must prevent. Suppressing them is what this existing option is for,
+        // so the drain needs nothing new from core.
+        ...(drainEnabled(options) ? { handleSignals: false } : {}),
         safeDelivery: typeof options.safe === 'undefined' ? true : options.safe,
         safeDeliveryTtl:
             typeof options.safeLockTtl === 'undefined'
@@ -727,20 +1339,25 @@ export class JobQueuePublisher<T>
             }
         };
 
-        this.imq
-            .send(
-                this.name,
-                {
-                    job: job as unknown as AnyJson,
-                    ...(options.ttl
-                        ? { expire: Date.now() + options.ttl }
-                        : {}),
-                    ...(options.delay ? { delay: options.delay } : {}),
-                },
-                options.delay,
-                report,
-            )
-            .catch(report);
+        // tracked without a message: a push that has not reached the broker is
+        // not a job to put back, it is a job that was never enqueued — so a
+        // drain waits for it, but never re-queues it
+        this.track(
+            this.imq
+                .send(
+                    this.name,
+                    {
+                        job: job as unknown as AnyJson,
+                        ...(options.ttl
+                            ? { expire: Date.now() + options.ttl }
+                            : {}),
+                        ...(options.delay ? { delay: options.delay } : {}),
+                    },
+                    options.delay,
+                    report,
+                )
+                .catch(report),
+        );
 
         return this;
     }
@@ -811,126 +1428,13 @@ export class JobQueueWorker<T>
     public onPop(handler: JobQueuePopHandler<T>): JobQueueWorker<T> {
         this.handler = handler;
         this.imq.removeAllListeners('message');
-        this.imq.on('message', async (message: any, id?: string) => {
-            if (typeof message !== 'object' || !message) {
-                this.logger.warn(
-                    '[JobQueue] Invalid message received, skipping:',
-                    JSON.stringify(message),
-                );
-
-                return;
-            }
-
-            const { job, expire, delay } = message;
-            let rescheduleDelay: number | void | undefined | Promise<any>;
-            let handlerError: unknown;
-            let failed = false;
-
-            try {
-                rescheduleDelay = this.handler?.(job);
-
-                if (
-                    rescheduleDelay &&
-                    typeof rescheduleDelay === 'object' &&
-                    rescheduleDelay &&
-                    (rescheduleDelay as any).then
-                ) {
-                    // it's promise
-                    rescheduleDelay = await rescheduleDelay;
-                }
-            } catch (err) {
-                rescheduleDelay = delay;
-                handlerError = err;
-                failed = true;
-            }
-
-            const expired = typeof expire === 'number' && expire <= Date.now();
-            const retrying =
-                typeof rescheduleDelay === 'number' && rescheduleDelay >= 0;
-
-            // the line is written once the outcome is known, so that it says
-            // what happens next instead of leaving the reader guessing; the
-            // handler's error object is never logged - it may quote the job
-            if (failed) {
-                const code = errorCode(handlerError);
-
-                // this line existed on every failure before, and each
-                // occurrence carries its own message id and its own retry
-                // decision
-                logSafe(
-                    this.logger,
-                    'error',
-                    `[JobQueue] Error handling job: queue ${this.name}, ` +
-                        `message ${id || 'unknown'}, code ${code}, ${
-                            expired || !retrying
-                                ? 'no retry'
-                                : `retry in ${rescheduleDelay} ms`
-                        }`,
-                );
-            }
-
-            if (expired) {
-                // only when a retry was actually asked for: on a plain
-                // successful handler this branch is the normal end of a job
-                if (retrying) {
-                    // one line per expired job: each carries its own message
-                    // id, and the flow is bounded by the expired backlog
-                    logSafe(
-                        this.logger,
-                        'info',
-                        `[JobQueue] retry suppressed, ttl expired: queue ${
-                            this.name
-                        }, message ${id || 'unknown'}`,
-                    );
-                }
-
-                return; // remove job from queue
-            }
-
-            if (retrying) {
-                // both causes of a failed re-schedule go through one line:
-                // the send rejecting, and the write to redis being rejected
-                // afterwards, which core may deliver through both the command
-                // callback and the returned promise - hence the once-guard.
-                // The value keeps escaping the handler exactly as it does
-                // today - it is logged, not swallowed
-                let reported = false;
-                const report = (err: unknown): void => {
-                    try {
-                        if (reported) {
-                            return;
-                        }
-
-                        reported = true;
-
-                        const code = errorCode(err);
-
-                        logSafe(
-                            this.logger,
-                            'error',
-                            `[JobQueue] Job re-schedule failed: queue ${
-                                this.name
-                            }, message ${id || 'unknown'}, code ${code}`,
-                        );
-                    } catch {
-                        // logging must never influence the queue
-                    }
-                };
-
-                try {
-                    await this.imq.send(
-                        this.name,
-                        message,
-                        rescheduleDelay as number,
-                        report,
-                    );
-                } catch (err) {
-                    report(err);
-
-                    throw err;
-                }
-            }
-        });
+        this.imq.on('message', (message: any, id?: string) =>
+            // the whole body is tracked, not just the handler: a handler that
+            // asks to be retried re-schedules itself through imq.send() at the
+            // end of it, and a drain that exited before that send completed
+            // would lose the retry it was told to make
+            this.track(this.handleMessage(message, id), message),
+        );
 
         return this;
     }
@@ -956,7 +1460,8 @@ export class JobQueueWorker<T>
  * On SIGTERM, SIGINT or SIGABRT the underlying `@imqueue/core` queue releases its
  * watcher locks and exits the process. That is orderly, but it is not a drain: a
  * handler still running is not awaited, so the job it was working on loses that
- * attempt. Do the draining yourself if a half-finished job would leave a mess.
+ * attempt. Turn on {@link JobQueueOptions.drain} — or set `IMQ_DRAIN_ENABLE=1` —
+ * to wait for it instead.
  *
  * @example
  * ```typescript
