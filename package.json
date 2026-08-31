@@ -18,9 +18,10 @@
     "lint": "oxlint",
     "format": "oxfmt \"index.ts\" \"test/**/*.ts\"",
     "format:check": "oxfmt --check \"index.ts\" \"test/**/*.ts\"",
-    "test": "npm run build && node --experimental-test-module-mocks --import ./test/mocks/index.js --test --test-timeout=15000 $(find test -name '*.spec.js')",
-    "test-coverage": "npm run build && node --experimental-test-module-mocks --enable-source-maps --import ./test/mocks/index.js --test --experimental-test-coverage --test-timeout=15000 $(find test -name '*.spec.js')",
-    "test-lcov": "npm run build && mkdir -p coverage && node --experimental-test-module-mocks --enable-source-maps --import ./test/mocks/index.js --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-timeout=15000 $(find test -name '*.spec.js'); node scripts/strip-comment-coverage.mjs coverage/lcov.info",
+    "test": "npm run build && node --experimental-test-module-mocks --import ./test/mocks/index.js --test --test-timeout=15000 $(find test -name '*.spec.js' -not -path 'test/integration/*')",
+    "test-coverage": "npm run build && node --experimental-test-module-mocks --enable-source-maps --import ./test/mocks/index.js --test --experimental-test-coverage --test-timeout=15000 $(find test -name '*.spec.js' -not -path 'test/integration/*')",
+    "test-lcov": "npm run build && mkdir -p coverage && node --experimental-test-module-mocks --enable-source-maps --import ./test/mocks/index.js --test --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-timeout=15000 $(find test -name '*.spec.js' -not -path 'test/integration/*'); node scripts/strip-comment-coverage.mjs coverage/lcov.info",
+    "test-integration": "npm run build && node --test --test-timeout=60000 $(find test/integration -name '*.spec.js')",
     "clean-typedefs": "find . -name '*.d.ts' -not -wholename '*node_modules*' -type f -delete",
     "clean-maps": "find . -name '*.js.map' -not -wholename '*node_modules*' -type f -delete",
     "clean-js": "find . -name '*.js' -not -wholename '*node_modules*' -not -wholename '*scripts*' -type f -delete",
@@ -39,7 +40,7 @@
   "author": "imqueue.com <support@imqueue.com> (https://imqueue.com)",
   "license": "GPL-3.0-only",
   "dependencies": {
-    "@imqueue/core": "^3.4.3"
+    "@imqueue/core": "^3.5.0"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",

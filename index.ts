@@ -466,6 +466,26 @@ export interface JobQueueOptions {
     password?: string;
 
     /**
+     * Encrypts the broker connection with TLS. `true` connects with Node's
+     * defaults, verifying the broker against the system trust store; an object
+     * is handed to `tls.connect()` as given, so supply `ca` for a private
+     * certificate authority and `cert` with `key` for mutual TLS.
+     *
+     * @defaultValue undefined
+     *
+     * @remarks
+     * The broker must be listening for TLS. One that is not will refuse the
+     * handshake rather than fall back to plaintext, so a queue never quietly
+     * downgrades.
+     *
+     * Leave it unset and `@imqueue/core` consults the environment instead —
+     * `IMQ_REDIS_TLS` and its companions — which lets a deployment encrypt
+     * every job queue it runs without a code change. Pass `false` to decline
+     * that fallback.
+     */
+    tls?: IMQOptions['tls'];
+
+    /**
      * Logger for the queue's own log and error messages.
      *
      * @defaultValue console
@@ -1227,6 +1247,11 @@ function toIMQOptions(
         cluster: options.cluster,
         username: options.username,
         password: options.password,
+        // omitted entirely when the caller says nothing, which is what lets
+        // core fall back to the IMQ_REDIS_TLS* environment variables - and
+        // keeps the queue's options exactly the shape they always had for
+        // everyone who does not use TLS
+        ...(options.tls === undefined ? {} : { tls: options.tls }),
         cleanup: false,
         // the queue layer's own SIGTERM/SIGINT/SIGABRT handlers exit the
         // process without waiting for a handler, which is exactly what a drain

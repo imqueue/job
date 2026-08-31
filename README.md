@@ -71,6 +71,44 @@ new JobQueueWorker<string>({ name: 'CustomTestJob' })
     .catch(err => console.error(err));
 ~~~
 
+# Transport encryption (TLS)
+
+Set `tls` and the queue's connection to the broker is encrypted. `true`
+connects with Node's defaults, verifying the broker against the system trust
+store; an object is handed to `tls.connect()` as given:
+
+```typescript
+import { readFileSync } from 'node:fs';
+import { JobQueue } from '@imqueue/job';
+
+const queue = new JobQueue({
+    name: 'Email',
+    cluster: [{ host: 'redis.internal', port: 6380 }],
+    password: process.env.REDIS_PASSWORD,
+    tls: {
+        ca: readFileSync('/etc/redis-tls/ca.crt'),
+        cert: readFileSync('/etc/redis-tls/client.crt'),  // mutual TLS,
+        key: readFileSync('/etc/redis-tls/client.key'),   // if asked for
+    },
+});
+```
+
+The broker has to be listening for TLS. One that is not refuses the handshake
+rather than falling back to plaintext, so a queue never quietly downgrades.
+
+Leave `tls` out and `@imqueue/core` reads the environment instead —
+`IMQ_REDIS_TLS`, `IMQ_REDIS_TLS_CA_FILE`, `IMQ_REDIS_TLS_CERT_FILE`,
+`IMQ_REDIS_TLS_KEY_FILE`, `IMQ_REDIS_TLS_SERVERNAME` — which encrypts every job
+queue in a deployment without a code change. Passing `tls` explicitly always
+wins, `tls: false` included. See the `@imqueue/core` README for the full list
+and for the two things that will bite you: a certificate is verified against
+the host you connect to, and `rejectUnauthorized: false` is not a shortcut.
+
+This is covered against a real broker rather than a mock: `npm run
+test-integration` stands up a throwaway TLS-only redis and pushes a job across
+it. Those specs skip themselves where `redis-server` and `openssl` are not both
+installed, and `npm test` does not run them.
+
 # Graceful shutdown
 
 By default a worker signalled mid-job abandons it: `@imqueue/core`'s signal

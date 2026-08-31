@@ -9,6 +9,27 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **TLS on the broker connection.** A new `tls` option encrypts the queue's
+  connection to the broker: `true` for Node's defaults, an object handed to
+  `tls.connect()` as given, so a private CA and mutual TLS both work. It is
+  passed straight through to `@imqueue/core`, which is where it takes effect,
+  and it applies to `JobQueue`, `JobQueuePublisher` and `JobQueueWorker`
+  alike. Requires `@imqueue/core` 3.5.0.
+
+  Covered by integration specs in `test/integration/`, run by
+  `npm run test-integration`, which stand up a throwaway TLS-only redis and
+  assert what a mocked `ioredis` cannot: that the handshake completes and is
+  verified, that a job crosses from a publisher to a worker over it, and that
+  plaintext, an unverifiable certificate and a wrong server name are refused
+  rather than downgraded. They skip themselves, with a reason, wherever
+  `redis-server` and `openssl` are not both available, so a checkout without
+  redis still passes; `npm test` excludes them and is unchanged in what it runs.
+
+  Left unset, the option stays absent rather than becoming an explicit
+  `undefined`, which is what lets core fall back to the `IMQ_REDIS_TLS*`
+  environment variables — so a deployment can encrypt every job queue it runs
+  without touching application code. Pass `false` to decline that fallback.
+
 - **Opt-in graceful shutdown draining.** With `IMQ_DRAIN_ENABLE=1` — or the new
   `drain` option — `SIGTERM` and `SIGINT` now stop popping, wait for the jobs
   already being handled, then release the connection and exit `0`, in that
