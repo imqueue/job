@@ -23,8 +23,8 @@
  */
 /**
  * Simple, safe-by-default Redis job queue for `@imqueue` services — delayed and
- * scheduled jobs, at-least-once delivery, and re-scheduling driven by whatever
- * the handler returns.
+ * scheduled jobs, at-least-once delivery, and retry by re-scheduling, driven by
+ * whatever the handler returns.
  *
  * Pick one of three shapes. {@link JobQueue}, the default export, both pushes and
  * handles jobs in one process. {@link JobQueuePublisher} only pushes and
