@@ -35,26 +35,48 @@
  * @remarks
  * Delivery is at-least-once, so handlers must be idempotent. Safe delivery is on
  * by default here, which is the opposite of `@imqueue/core`'s own default, and it
- * covers the hand-off of a job to a worker rather than its processing — see
+ * covers the whole of a job's processing, not only its hand-off to a worker — see
  * {@link JobQueueOptions.safe} for what that does and does not guarantee. Two
  * further core defaults are overridden: the key prefix is `imq-job` rather than
- * `imq`, and the safe-delivery TTL is 10 seconds rather than 5.
+ * `imq`, and the safe-delivery deadline ({@link JobQueueOptions.safeLockTtl}) is
+ * 10 seconds rather than core's 300 — a processing deadline, so read that option
+ * before running a handler that can take longer.
  *
  * Job data travels as JSON, so anything that does not survive `JSON.stringify` —
  * class instances, `Date`, `undefined` properties, cycles — does not arrive as it
  * left. Push a plain object and re-hydrate it in the handler.
  *
+ * What happens to a job if the worker dies while handling it: it comes back.
+ * Under safe delivery — the default here — a job is moved into a key owned by the
+ * worker as it is popped, and that key is held until the `onPop` handler's promise
+ * settles, not merely until the handler starts. Kill the process at any point in
+ * between, `SIGKILL` included, and the job is still checked out to the dead
+ * worker; the watcher sees the owner has left the broker's client list on its
+ * next sweep — every
+ * {@link https://imqueue.org/api/core/latest/core.imqoptions.watchercheckdelay/ | watcherCheckDelay},
+ * 5 seconds by default — and moves the job back onto the queue for another
+ * worker. Death is detected from the broker's connection state, not from a
+ * clock, so recovery does not wait for {@link JobQueueOptions.safeLockTtl}; that
+ * deadline covers the one case liveness cannot see, a handler wedged inside a
+ * worker that is still up and serving. Delivery is therefore at-least-once — a
+ * recovered job runs again from the start — and handlers must be idempotent. The
+ * contract is `@imqueue/core`'s:
+ * {@link https://imqueue.org/api/core/latest/core.imqoptions.safedelivery/ | IMQOptions.safeDelivery}.
+ *
  * Shutdown is worth knowing about before it matters in production. By default
  * `@imqueue/core` installs process-wide SIGTERM, SIGINT and SIGABRT handlers; they
  * release the queue's watcher locks and then exit the process without waiting for
- * a running handler to return. So a job in flight when the signal arrives loses
- * that attempt, and is re-delivered later only if safe delivery had the job checked
- * out — which it does not once the job has reached the handler.
+ * a running handler to return. A job in flight when the signal arrives is not
+ * lost — it is still checked out and comes back as above — but it does not finish
+ * either: it is re-run from the start on another worker, seconds later.
  *
  * Set `IMQ_DRAIN_ENABLE=1`, or {@link JobQueueOptions.drain}, and SIGTERM/SIGINT
- * instead stop popping, wait for the handlers already running, put back anything
- * the budget ran out on, and exit `0`. It is off by default, so nothing about an
- * existing worker changes until you turn it on.
+ * instead stop popping, wait for the handlers already running, and exit `0`, so
+ * the work completes here rather than being replayed elsewhere. Whatever the
+ * budget ran out on is still checked out and comes back through the lease; see
+ * {@link JobQueueOptions.drainRequeue} before leaving that option on. The drain is
+ * off by default, so nothing about an existing worker changes until you turn it
+ * on.
  *
  * @example
  * ```typescript
@@ -498,44 +520,55 @@ export interface JobQueueOptions {
     logger?: ILogger;
 
     /**
-     * Whether a job is handed to a worker under a lock, so that a worker dying
-     * before it starts does not take the job with it.
+     * Whether a job is handed to a worker under a lease, so that a worker dying
+     * at any point before its handler settles does not take the job with it.
      *
      * @defaultValue true
      *
      * @remarks
      * When safe delivery is enabled a job is moved atomically out of the queue
-     * into a worker-owned key as it is popped, so a process that dies before it
-     * even starts on that job leaves the job data behind to be re-queued for
-     * another worker instead of losing it.
+     * into a worker-owned key as it is popped, and that key is held until the
+     * `onPop` handler's promise settles. A process that dies before then — before
+     * the handler starts, part-way through it, `SIGKILL` included — leaves the
+     * job checked out to a worker that no longer exists, and the watcher moves it
+     * back onto the queue for another worker on its next sweep, once the owner
+     * has left the broker's client list. The guarantee covers the processing, not
+     * only the hand-off.
      *
-     * The guarantee covers that hand-off and not the processing: the key is
-     * released as soon as the job reaches the handler, so a worker killed
-     * part-way through `onPop` loses that attempt. Jobs are delivered
-     * at-least-once, so handlers should be idempotent.
+     * It does not make the attempt finish: a recovered job runs again from the
+     * start, so delivery is at-least-once and handlers must be idempotent.
+     * {@link JobQueueOptions.drain} is the complement for an orderly shutdown —
+     * it lets the running handler complete instead of being re-run elsewhere.
      *
-     * {@link JobQueueOptions.drain} is what covers the processing, for an
-     * orderly shutdown at least — it waits for the handler rather than relying
-     * on a lease that has already been released. Neither covers `SIGKILL`.
-     *
-     * Note this defaults to `true` here while `@imqueue/core` defaults it to
-     * `false` — a job queue is the case where the extra round-trip is worth it.
+     * The behaviour is `@imqueue/core`'s and its contract is documented there:
+     * {@link https://imqueue.org/api/core/latest/core.imqoptions.safedelivery/ | IMQOptions.safeDelivery}.
+     * This package defaults it to `true` while core defaults to `false` — a job
+     * queue is the case where the extra round-trip is worth it.
      */
     safe?: boolean;
 
     /**
-     * How long, in milliseconds, a job may sit checked out to a worker during
-     * safe delivery before it is treated as abandoned.
+     * The longest, in milliseconds, a job may be worked on before it is treated
+     * as abandoned and moved back onto the queue for another worker.
      *
      * @defaultValue 10000
      *
      * @remarks
-     * A worker key still present once this expires is treated as abandoned and
-     * its job is moved back onto the queue, so this bounds how long an abandoned
-     * hand-off takes to come back. It is not a processing deadline: a job that
-     * takes longer than this to handle is neither interrupted nor re-queued.
+     * This is a processing deadline. Set it above the longest an `onPop` handler
+     * can legitimately take, with headroom: a worker that is alive and still
+     * working on a job past this budget has that job reclaimed and handed to
+     * another worker, so it runs twice. The 10 second default is far below
+     * `@imqueue/core`'s own 300000 — this package lowers it, it does not raise
+     * it — and a handler that awaits a slow upstream for longer than that is
+     * duplicated under default settings. Raise it before that happens.
      *
-     * `@imqueue/core`'s own default is 5000; this package raises it to 10000.
+     * It is not how a dead worker's job is recovered. Process death is detected
+     * from the owner leaving the broker's client list on the watcher's next
+     * sweep, within seconds and regardless of this value; the deadline exists
+     * for the case liveness cannot see — a handler wedged inside a worker that is
+     * otherwise up and serving. Maps to
+     * {@link https://imqueue.org/api/core/latest/core.imqoptions.safedeliveryttl/ | IMQOptions.safeDeliveryTtl},
+     * whose documentation is the contract.
      */
     safeLockTtl?: number;
 
@@ -548,8 +581,9 @@ export interface JobQueueOptions {
      * @remarks
      * Opt-in, and nothing about a queue with it off differs from before it
      * existed. Left off, `@imqueue/core`'s own signal handlers release the
-     * watcher locks and exit without waiting, so a job in flight loses that
-     * attempt.
+     * watcher locks and exit without waiting, so a job in flight is abandoned
+     * mid-handler — under safe delivery it stays checked out and is re-run from
+     * the start on another worker; without it, that attempt is lost.
      *
      * Turned on, `SIGTERM` and `SIGINT` instead stop popping, wait up to
      * {@link JobQueueOptions.drainTimeout} for the handlers already running —
@@ -562,7 +596,8 @@ export interface JobQueueOptions {
      * each other.
      *
      * Delivery stays at-least-once. A drain narrows the window in which an
-     * attempt is lost; it does not close it.
+     * attempt is abandoned and replayed — or, without safe delivery, lost; it
+     * does not close it.
      */
     drain?: boolean;
 
@@ -577,8 +612,10 @@ export interface JobQueueOptions {
      * The wait is always bounded and the process always exits. This is the
      * number to raise for jobs that legitimately take longer than a few seconds
      * — the 4000 default is sized for the `imq stop` CLI, not for your handlers.
-     * Whatever is still running when it expires is abandoned, and
-     * {@link JobQueueOptions.drainRequeue} decides whether it comes back.
+     * Whatever is still running when it expires is abandoned. Under safe delivery
+     * it is still checked out and comes back through the lease once the process
+     * is gone; {@link JobQueueOptions.drainRequeue} only decides whether a second
+     * copy is pushed as well.
      */
     drainTimeout?: number;
 
@@ -588,18 +625,18 @@ export interface JobQueueOptions {
      * @defaultValue the `IMQ_DRAIN_REQUEUE` environment variable, itself `true`
      *
      * @remarks
-     * This closes the hole the drain itself opens. Safe delivery releases a
-     * job's worker key as soon as the job reaches the handler, so a job the
-     * drain abandons at its budget is not checked out to anybody and nothing
-     * re-queues it — it is simply gone. Re-pushing it on the way out makes that
-     * attempt recoverable.
+     * Under safe delivery this is not what brings an abandoned job back — the
+     * lease is. A job the drain abandons at its budget is still checked out to
+     * this worker, because its handler has not settled, and once the process
+     * exits the watcher returns it to the queue on its next sweep. Re-pushing it
+     * here as well delivers it twice: once from the re-push and once from the
+     * lease recovery — and the abandoned handler may still complete before the
+     * exit, so the same job can execute up to three times.
      *
-     * The cost is the usual at-least-once one, and it is worth stating plainly:
-     * the abandoned handler is still running when its job is pushed back, so the
-     * job can both complete and be delivered again. That is the same duplicate a
-     * lease expiry would produce, and the reason handlers must be idempotent.
-     *
-     * Turn it off if a duplicate is worse than a lost attempt.
+     * It is the sole recovery only with safe delivery off
+     * ({@link JobQueueOptions.safe} `false`), where nothing else holds the job.
+     * With safe delivery on — the default — turn it off, or accept the extra copy
+     * as part of the at-least-once contract handlers already have to survive.
      */
     drainRequeue?: boolean;
 
@@ -1114,14 +1151,15 @@ export abstract class BaseJobQueue<T, U> implements AnyJobQueue<T> {
      * Drain step three: put back whatever the budget ran out on.
      *
      * @remarks
-     * Only jobs, and only with {@link JobQueueOptions.drainRequeue} on. Safe
-     * delivery released each job's worker key the moment the job reached the
-     * handler, so an abandoned job is checked out to nobody and nothing else
-     * would ever bring it back.
+     * Only jobs, and only with {@link JobQueueOptions.drainRequeue} on. Under
+     * safe delivery each abandoned job is still checked out — its handler has not
+     * settled, so its worker key is held — and the lease returns it to the queue
+     * once this process is gone. This step therefore adds a copy rather than
+     * rescuing one; it is the sole recovery only when safe delivery is off.
      *
      * The abandoned handler is still running as this pushes its job back, so the
-     * job may both finish and be delivered again — the at-least-once duplicate
-     * a lease expiry would have produced anyway.
+     * job may finish here and also be delivered again — twice, counting the
+     * lease recovery.
      */
     public async drainRequeue(): Promise<void> {
         const abandoned = [...(this.inFlight ?? [])];
