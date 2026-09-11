@@ -709,9 +709,13 @@ export interface JobQueuePopHandler<T> {
      * returns is never re-scheduled, whichever of those it did — expiry outranks
      * the handler's request.
      *
-     * Re-scheduling on throw needs this process to still be alive: if the worker
-     * goes down while this handler is running, that attempt is lost — safe
-     * delivery guards the hand-off of a job, not its processing.
+     * Re-scheduling needs this process to still be alive, because the return
+     * value is acted on here: if the worker goes down while this handler is
+     * running, the delay it would have asked for is never applied. The job
+     * itself is not lost — under safe delivery it stays checked out until the
+     * handler settles, and the watcher re-delivers it to another worker from the
+     * start, without that delay, once this process has left the broker's client
+     * list.
      *
      * @example
      * ```typescript
@@ -1522,9 +1526,12 @@ export class JobQueueWorker<T>
  * @remarks
  * On SIGTERM, SIGINT or SIGABRT the underlying `@imqueue/core` queue releases its
  * watcher locks and exits the process. That is orderly, but it is not a drain: a
- * handler still running is not awaited, so the job it was working on loses that
- * attempt. Turn on {@link JobQueueOptions.drain} — or set `IMQ_DRAIN_ENABLE=1` —
- * to wait for it instead.
+ * handler still running is not awaited, so the job it was working on is
+ * abandoned mid-handler. Under safe delivery — the default — it is not lost: it
+ * stays checked out and is re-run from the start on another worker once this
+ * process has left the broker's client list. Turn on
+ * {@link JobQueueOptions.drain} — or set `IMQ_DRAIN_ENABLE=1` — to let it finish
+ * here instead.
  *
  * @example
  * ```typescript
