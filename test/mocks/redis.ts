@@ -40,6 +40,9 @@ export class RedisClientMock extends EventEmitter {
     private static __keys: any = {};
     private static __scripts: any = {};
     private __name: string = '';
+    private static __ids: number = 0;
+    // the id `CLIENT ID` answers with, unique per mock connection
+    public __id: number = ++RedisClientMock.__ids;
     public connected: boolean = true;
     public status = 'ready';
     public options: any;
@@ -272,7 +275,12 @@ export class RedisClientMock extends EventEmitter {
     public client(...args: any[]): string | boolean {
         const self = RedisClientMock;
         const cmd = args.shift();
-        const cb = args.pop();
+        // only a trailing function is a callback: `CLIENT UNBLOCK <id>` ends
+        // with the id, which must stay an argument
+        const cb =
+            typeof args[args.length - 1] === 'function'
+                ? args.pop()
+                : undefined;
         const name = args.shift();
 
         if (cmd === 'LIST') {
@@ -285,6 +293,13 @@ export class RedisClientMock extends EventEmitter {
         } else if (cmd === 'SETNAME') {
             this.__name = name;
             self.__clientList[name] = true;
+        } else if (cmd === 'ID') {
+            // ioredis returns a promise; @imqueue/core >= 3.7.0 asks a reader
+            // connection for its id with `client('ID').then(...)`
+            return Promise.resolve(this.__id) as any;
+        } else if (cmd === 'UNBLOCK') {
+            // no mock connection ever blocks, so there is nothing to release
+            return Promise.resolve(0) as any;
         }
 
         this.cbExecute(cb, null, true);
